@@ -23,6 +23,8 @@ enum CoverRenderer {
         enum Shape { case oval, rectangle, mask(CIImage) }
         var shape: Shape
         var rect: CGRect
+        /// The raw detection box, for the outline diagnostic.
+        var raw: CGRect? = nil
     }
 
     /// A cover rect grown by the style's padding.
@@ -37,9 +39,44 @@ enum CoverRenderer {
     static func apply(_ covers: [Cover], to image: CIImage, style: CoverStyle,
                       emojiImage: CIImage?) -> CIImage {
         guard !covers.isEmpty else { return image }
+        guard !style.outline else { return outlined(covers, on: image, style: style) }
         var out = image
         for cover in covers {
             out = apply(cover, to: out, style: style, emojiImage: emojiImage)
+        }
+        return out
+    }
+
+    /// The diagnostic: the final cover framed in green, the raw detection
+    /// framed in red, nothing hidden.
+    private static func outlined(_ covers: [Cover], on image: CIImage,
+                                 style: CoverStyle) -> CIImage {
+        let thickness = max(2, image.extent.width / 500)
+        var out = image
+        for cover in covers {
+            out = frame(padded(cover.rect, padding: style.padding),
+                        color: CIColor(red: 0, green: 1, blue: 0), thickness: thickness, on: out)
+            if let raw = cover.raw {
+                out = frame(raw, color: CIColor(red: 1, green: 0, blue: 0),
+                            thickness: thickness, on: out)
+            }
+        }
+        return out
+    }
+
+    private static func frame(_ rect: CGRect, color: CIColor, thickness: CGFloat,
+                              on image: CIImage) -> CIImage {
+        let bars = [
+            CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: thickness),
+            CGRect(x: rect.minX, y: rect.maxY - thickness, width: rect.width, height: thickness),
+            CGRect(x: rect.minX, y: rect.minY, width: thickness, height: rect.height),
+            CGRect(x: rect.maxX - thickness, y: rect.minY, width: thickness, height: rect.height),
+        ]
+        var out = image
+        for bar in bars {
+            let clipped = bar.intersection(image.extent)
+            guard !clipped.isEmpty else { continue }
+            out = CIImage(color: color).cropped(to: clipped).composited(over: out)
         }
         return out
     }
@@ -66,7 +103,9 @@ enum CoverRenderer {
             return placed.composited(over: image)
 
         case .blur:
-            let radius = 6 + style.intensity * 45
+            // The radius scales with the COVER, not fixed pixels: a fixed
+            // 45px blur that anonymized 1080p left glasses readable at 4K.
+            let radius = max(6, style.intensity * min(face.width, face.height) * 0.15)
             let blurred = image
                 .clampedToExtent()
                 .applyingFilter("CIGaussianBlur", parameters: ["inputRadius": radius])

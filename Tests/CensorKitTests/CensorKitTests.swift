@@ -73,7 +73,10 @@ final class CensorKitTests: XCTestCase {
 
         let held = TrackMath.extend(smoothed, hold: 0.75)
         XCTAssertEqual(held.last?.time ?? 0, 1.75, accuracy: 1e-9)
-        XCTAssertEqual(held.last?.x ?? 0, 0.475, accuracy: 1e-9, "the hold freezes the last box")
+        // The tail is MOVING (0.55 → 0.475 over 0.5 s = 0.15/s), so the
+        // hold continues the motion: 0.475 − 0.15 × 0.75.
+        XCTAssertEqual(held.last?.x ?? 0, 0.3625, accuracy: 1e-9,
+                       "a moving hold follows the exit velocity")
 
         XCTAssertNil(TrackMath.box(at: -0.1, in: held))
         XCTAssertNil(TrackMath.box(at: 1.76, in: held))
@@ -310,6 +313,199 @@ final class CensorKitTests: XCTestCase {
         let center = bgra(80, 80)
         XCTAssertLessThan(center.b, 220)
         XCTAssertGreaterThan(center.b + center.g + center.r, 120, "blurred, not blacked out")
+    }
+
+    // MARK: - Coverage, orientation and exit rules
+
+    func testFaceGeometryGrowsUpAndOut() {
+        let head = FaceGeometry.coverBox(x: 0.4, y: 0.4, width: 0.2, height: 0.2)
+        XCTAssertEqual(head.width, 0.32, accuracy: 1e-9, "1.6× wide")
+        XCTAssertEqual(head.height, 0.44, accuracy: 1e-9, "2.2× tall")
+        XCTAssertEqual(head.x, 0.34, accuracy: 1e-9, "widened symmetrically")
+        // 0.24 of added height, 65% of it above: y = 0.4 − 0.156.
+        XCTAssertEqual(head.y, 0.244, accuracy: 1e-9, "the growth is biased above — hair lives there")
+
+        let clamped = FaceGeometry.coverBox(x: 0.9, y: 0.02, width: 0.15, height: 0.1)
+        XCTAssertLessThanOrEqual(clamped.x + clamped.width, 1.0)
+        XCTAssertGreaterThanOrEqual(clamped.y, 0.0)
+    }
+
+    func testOrientationMapping() {
+        let portrait = CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 2160, ty: 0)
+        XCTAssertEqual(OrientationMap.quarterTurns(of: portrait), 1)
+        XCTAssertEqual(OrientationMap.quarterTurns(of: .identity), 0)
+        XCTAssertEqual(OrientationMap.quarterTurns(of: CGAffineTransform(a: -1, b: 0, c: 0, d: -1, tx: 0, ty: 0)), 2)
+        XCTAssertEqual(OrientationMap.visionOrientation(quarterTurns: 1), .right)
+
+        // Display top-center → storage right-center, for a 90° CW display
+        // rotation (derived by hand: xs = yd, ys = 1 − xd − wd).
+        let s1 = OrientationMap.toStorage(x: 0.45, y: 0.05, width: 0.1, height: 0.08, quarterTurns: 1)
+        XCTAssertEqual(s1.x, 0.05, accuracy: 1e-9)
+        XCTAssertEqual(s1.y, 0.45, accuracy: 1e-9)
+        XCTAssertEqual(s1.width, 0.08, accuracy: 1e-9)
+        XCTAssertEqual(s1.height, 0.1, accuracy: 1e-9)
+
+        // Round trips: mapping by turns then by the inverse turns is identity.
+        for (turns, inverse) in [(1, 3), (2, 2), (3, 1)] {
+            let once = OrientationMap.toStorage(x: 0.2, y: 0.3, width: 0.25, height: 0.15, quarterTurns: turns)
+            let back = OrientationMap.toStorage(x: once.x, y: once.y, width: once.width,
+                                                height: once.height, quarterTurns: inverse)
+            XCTAssertEqual(back.x, 0.2, accuracy: 1e-9, "turns \(turns)")
+            XCTAssertEqual(back.y, 0.3, accuracy: 1e-9)
+            XCTAssertEqual(back.width, 0.25, accuracy: 1e-9)
+            XCTAssertEqual(back.height, 0.15, accuracy: 1e-9)
+        }
+    }
+
+    func testExitAwareHold() {
+        // Stationary: frozen in place, the conservative occlusion case.
+        let still = [TrackedBox(time: 0, x: 0.4, y: 0.4, width: 0.1, height: 0.1),
+                     TrackedBox(time: 0.5, x: 0.401, y: 0.4, width: 0.1, height: 0.1)]
+        let frozen = TrackMath.extend(still, hold: 0.75)
+        XCTAssertEqual(frozen.last?.x ?? 0, 0.401, accuracy: 1e-9)
+        XCTAssertEqual(frozen.last?.time ?? 0, 1.25, accuracy: 1e-9)
+
+        // Walking off the right edge: the hold slides with the exit and is
+        // cut once the box would be fully outside.
+        let leaving = [TrackedBox(time: 0, x: 0.6, y: 0.4, width: 0.2, height: 0.2),
+                       TrackedBox(time: 0.25, x: 0.8, y: 0.4, width: 0.2, height: 0.2)]
+        let slid = TrackMath.extend(leaving, hold: 0.75)
+        // Velocity 0.8/s rightward; fully out when x reaches 1.0 → 0.25 s.
+        XCTAssertEqual(slid.last?.time ?? 0, 0.5, accuracy: 1e-9, "the hold decays at the edge")
+        XCTAssertEqual(slid.last?.x ?? 0, 1.0, accuracy: 1e-9, "…having slid to it, not frozen mid-air")
+    }
+
+    func testRotatedVideoCoversTrackTheDisplayPath() async throws {
+        guard let fixtures else { throw XCTSkip("no face fixtures on this machine") }
+        let portraitURL = fixtures.appendingPathComponent("businesswoman-isolated.jpg")
+        guard FileManager.default.fileExists(atPath: portraitURL.path) else {
+            throw XCTSkip("fixture businesswoman-isolated.jpg missing")
+        }
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("censor-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Storage 640×360 shown as 360×640 portrait via a 90° CW transform.
+        // The portrait glides down the DISPLAY: x_d fixed, y_d 0.05 → 0.25.
+        let W = 640, H = 360, fps: Int32 = 12, frames = 24
+        let source = CIImage(contentsOf: portraitURL)!
+        // Upright in display = rotated 90° CCW in storage.
+        let rotated = source.oriented(.left)
+        // Person height ≈ 0.9 of display height = 0.9 × W in storage x-extent.
+        let scale = 0.9 * CGFloat(W) / rotated.extent.width
+        let sprite = rotated.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+
+        let input = dir.appendingPathComponent("rotated.mov")
+        let writer = try AVAssetWriter(outputURL: input, fileType: .mov)
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: W, AVVideoHeightKey: H,
+        ])
+        videoInput.transform = CGAffineTransform(rotationAngle: .pi / 2)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: videoInput,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: W, kCVPixelBufferHeightKey as String: H,
+            ])
+        writer.add(videoInput)
+        XCTAssertTrue(writer.startWriting())
+        writer.startSession(atSourceTime: .zero)
+        let context = CIContext()
+        let ground = CIImage(color: CIColor(red: 0.2, green: 0.25, blue: 0.2))
+            .cropped(to: CGRect(x: 0, y: 0, width: W, height: H))
+        var displayTops: [Double] = []
+        for i in 0..<frames {
+            let f = Double(i) / Double(frames - 1)
+            let yd = 0.05 + f * 0.20                      // display top of the sprite
+            displayTops.append(yd)
+            // Display (xd fixed ≈ centered) → storage: the sprite's display
+            // top-left maps to storage with x_s = y_d (hand-derived).
+            let sx = CGFloat(yd) * CGFloat(W)
+            let sy = (CGFloat(H) - sprite.extent.height) / 2
+            let frame = sprite
+                .transformed(by: CGAffineTransform(translationX: sx - sprite.extent.origin.x,
+                                                   y: sy - sprite.extent.origin.y))
+                .composited(over: ground)
+            while !videoInput.isReadyForMoreMediaData { usleep(2000) }
+            var buffer: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBuffer(nil, adaptor.pixelBufferPool!, &buffer)
+            context.render(frame, to: buffer!)
+            adaptor.append(buffer!, withPresentationTime: CMTime(value: CMTimeValue(i), timescale: fps))
+        }
+        videoInput.markAsFinished()
+        let done = XCTestExpectation(description: "written")
+        writer.finishWriting { done.fulfill() }
+        await fulfillment(of: [done], timeout: 30)
+        XCTAssertEqual(writer.status, .completed)
+
+        let output = dir.appendingPathComponent("rotated-censored.mov")
+        let outcome = try await VideoCensor.censor(
+            videoAt: input, target: .faces(except: [], only: []),
+            style: CoverStyle(mode: .pixelate, intensity: 1),
+            to: output, dryRun: false,
+            options: VideoCensor.Options(detectStride: 0.15, hold: 0.3))
+        XCTAssertEqual(outcome.status, .covered, outcome.detail ?? "")
+
+        // Compare source and censored frames midway: the changed pixels
+        // must sit where the face is — in STORAGE space, x near the
+        // sprite's display-y position (plus the in-sprite face offset),
+        // y in the band the face occupies.
+        func frameAt(_ url: URL, index: Int) async throws -> CVPixelBuffer {
+            let asset = AVURLAsset(url: url)
+            let track = try await asset.loadTracks(withMediaType: .video).first!
+            let reader = try AVAssetReader(asset: asset)
+            let out = AVAssetReaderTrackOutput(track: track, outputSettings: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+            reader.add(out)
+            XCTAssertTrue(reader.startReading())
+            var n = 0
+            while let sample = out.copyNextSampleBuffer() {
+                if n == index, let buffer = CMSampleBufferGetImageBuffer(sample) {
+                    reader.cancelReading()
+                    return buffer
+                }
+                n += 1
+            }
+            fatalError("frame \(index) missing")
+        }
+        let midIndex = frames / 2
+        let a = try await frameAt(input, index: midIndex)
+        let b = try await frameAt(output, index: midIndex)
+        CVPixelBufferLockBaseAddress(a, .readOnly); CVPixelBufferLockBaseAddress(b, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(a, .readOnly); CVPixelBufferUnlockBaseAddress(b, .readOnly) }
+        let baseA = CVPixelBufferGetBaseAddress(a)!.assumingMemoryBound(to: UInt8.self)
+        let baseB = CVPixelBufferGetBaseAddress(b)!.assumingMemoryBound(to: UInt8.self)
+        let rowA = CVPixelBufferGetBytesPerRow(a), rowB = CVPixelBufferGetBytesPerRow(b)
+        var sumX = 0.0, sumY = 0.0, count = 0.0
+        for y in 0..<H {
+            for x in 0..<W {
+                let pa = y * rowA + x * 4, pb = y * rowB + x * 4
+                let d = abs(Int(baseA[pa]) - Int(baseB[pb])) + abs(Int(baseA[pa + 1]) - Int(baseB[pb + 1]))
+                    + abs(Int(baseA[pa + 2]) - Int(baseB[pb + 2]))
+                if d > 90 { sumX += Double(x); sumY += Double(y); count += 1 }
+            }
+        }
+        XCTAssertGreaterThan(count, 300, "the cover must have changed a real region")
+        let cx = sumX / count / Double(W)
+        let cy = sumY / count / Double(H)
+        // Expected face center in storage: display top yd(mid) plus the
+        // face's in-sprite offset. Face in the portrait sits at display
+        // fractions (x 0.41–0.56, y 0.10–0.20 of the image) → in storage
+        // x runs with display y. Sprite occupies 0.9 of display height.
+        let yd = displayTops[midIndex]
+        let expectedCX = yd + (0.10 + 0.05) * 0.9      // display-y of face center × sprite span
+        // Storage y = 1 − xd − w: the sprite is x-centered in display, the
+        // face at 0.41–0.56 of its width; sprite width in display ≈
+        // sprite.extent.height/H of the display width.
+        let spriteDisplayW = Double(sprite.extent.height) / Double(H)
+        let faceDX = 0.5 - spriteDisplayW / 2 + (0.41 + 0.075) * spriteDisplayW
+        let expectedCY = 1 - faceDX
+        XCTAssertEqual(cx, expectedCX, accuracy: 0.12,
+                       "cover tracks the display-space path (storage x)")
+        XCTAssertEqual(cy, expectedCY, accuracy: 0.15,
+                       "cover sits on the face, not offset (storage y)")
     }
 
     // MARK: - Quality parity

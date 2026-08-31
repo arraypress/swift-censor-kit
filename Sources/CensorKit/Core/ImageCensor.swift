@@ -42,9 +42,18 @@ public enum ImageCensor {
                     ? FaceMatching.shouldCover(detection.embedding, except: except, only: only)
                     : true
                 guard cover else { kept += 1; continue }
-                covers.append(.init(shape: .oval, rect: CoverRenderer.coverRect(
+                // Vision's box is eyes-nose-mouth; the cover takes the head.
+                let head = FaceGeometry.coverBox(
                     x: detection.x, y: detection.y,
-                    width: detection.width, height: detection.height, in: image.extent)))
+                    width: detection.width, height: detection.height)
+                covers.append(.init(
+                    shape: .oval,
+                    rect: CoverRenderer.coverRect(
+                        x: head.x, y: head.y,
+                        width: head.width, height: head.height, in: image.extent),
+                    raw: CoverRenderer.coverRect(
+                        x: detection.x, y: detection.y,
+                        width: detection.width, height: detection.height, in: image.extent)))
             }
             if wantIdentity {
                 detail = "\(detections.count) faces, \(kept) left uncovered by reference match"

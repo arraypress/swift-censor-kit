@@ -24,6 +24,7 @@
 import AVFoundation
 import CoreImage
 import Foundation
+import ImageIO
 
 public enum VideoCensor {
 
@@ -57,6 +58,7 @@ public enum VideoCensor {
             videoTrack.load(.naturalSize), videoTrack.load(.preferredTransform),
             asset.load(.duration))
         let extent = CGRect(origin: .zero, size: naturalSize)
+        let turns = OrientationMap.quarterTurns(of: transform)
         let context = CIContext()
 
         // Analysis (faces and text; regions need none, person is per-frame).
@@ -68,7 +70,7 @@ public enum VideoCensor {
             let samples = try await sampleDetections(
                 asset: asset, track: videoTrack, stride: options.detectStride, context: context
             ) { image in
-                try Detector.faces(in: image, withEmbeddings: wantIdentity)
+                try Detector.faces(in: image, withEmbeddings: wantIdentity, quarterTurns: turns)
             }
             var all = TrackMath.associate(samples)
             if wantIdentity {
@@ -90,7 +92,7 @@ public enum VideoCensor {
             let samples = try await sampleDetections(
                 asset: asset, track: videoTrack, stride: options.detectStride, context: context
             ) { image in
-                try Detector.textBoxes(in: image, pattern: pattern)
+                try Detector.textBoxes(in: image, pattern: pattern, quarterTurns: turns)
             }
             tracks = TrackMath.associate(samples).map {
                 Track(id: $0.id,
@@ -218,7 +220,13 @@ public enum VideoCensor {
         writer.startSession(atSourceTime: .zero)
 
         // Interleaved pumping: every input is fed only when the writer asks.
-        let emoji = style.mode == .emoji ? CoverRenderer.renderEmoji(style.emoji) : nil
+        // The emoji must be upright in DISPLAY space: pre-rotate it by the
+        // inverse of the display rotation.
+        let emoji = style.mode == .emoji
+            ? CoverRenderer.renderEmoji(style.emoji).map {
+                turns == 0 ? $0 : $0.oriented(Self.emojiOrientation(quarterTurns: turns))
+            }
+            : nil
         let counters = Counters()
         let total = duration.seconds
         let plan = FramePlan(target: target, tracks: tracks, isPerson: isPerson,
@@ -380,12 +388,31 @@ public enum VideoCensor {
                 }
             default:
                 return tracks.compactMap { track in
-                    track.box(at: t).map {
-                        .init(shape: .oval, rect: CoverRenderer.coverRect(
-                            x: $0.x, y: $0.y, width: $0.width, height: $0.height, in: extent))
+                    track.box(at: t).map { box in
+                        let head = FaceGeometry.coverBox(
+                            x: box.x, y: box.y, width: box.width, height: box.height)
+                        return .init(
+                            shape: .oval,
+                            rect: CoverRenderer.coverRect(
+                                x: head.x, y: head.y,
+                                width: head.width, height: head.height, in: extent),
+                            raw: CoverRenderer.coverRect(
+                                x: box.x, y: box.y,
+                                width: box.width, height: box.height, in: extent))
                     }
                 }
             }
+        }
+    }
+
+    /// The pre-rotation that makes an emoji upright after the display
+    /// transform is applied — the INVERSE of the display rotation.
+    private static func emojiOrientation(quarterTurns: Int) -> CGImagePropertyOrientation {
+        switch quarterTurns {
+        case 1: return .left
+        case 2: return .down
+        case 3: return .right
+        default: return .up
         }
     }
 

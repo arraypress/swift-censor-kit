@@ -15,7 +15,7 @@ let outcome = try await VideoCensor.censor(
 
 ## What it does
 
-- **Faces** — detected per sampled frame, associated into tracks, smoothed, and held briefly past a missed detection so covers do not flicker. Covers are blur, pixelate, or an emoji.
+- **Faces** — detected per sampled frame (in DISPLAY orientation, so rotated phone footage registers correctly), associated into tracks, smoothed, and held briefly past a missed detection so covers do not flicker — a hold on a moving subject slides along their exit instead of freezing mid-air, and decays at the frame edge. Covers take the whole HEAD, not Vision's eyes-nose-mouth box (1.6× wide, 2.2× tall, biased above for hair — measured on real footage where the tight box left the person identifiable), and blur strength scales with the cover so 4K anonymizes as thoroughly as 1080p. Covers are blur, pixelate, or an emoji; `outline` mode draws the detection and cover boxes instead — registration made visible.
 - **Selective faces** — `except`/`only` take reference embeddings; a face matching a reference is spared (or is the only one covered). Identity is a feature print of the face crop — Apple ships no public recognition API — using swift-photo-index's measured calibration: the same person's crops sit 0.19–0.59 apart, different people never came closer than 1.1, and the 0.8 threshold sits in the gap. The library's test proves it to the pixel: with a reference from a *different shoot*, the referenced person's half of the canvas is untouched, byte for byte.
 - **People** — whole silhouettes via person-instance masks (`only` picks the Nth largest on stills; video covers everyone by segmentation).
 - **Text** — recognized lines containing a pattern, covered as softened rectangles.

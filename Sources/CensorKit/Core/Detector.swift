@@ -19,45 +19,78 @@ import Vision
 enum Detector {
 
     /// Detected faces; embeddings only when identity is needed.
-    static func faces(in image: CGImage, withEmbeddings: Bool) throws -> [TrackMath.Detection] {
+    ///
+    /// `quarterTurns` is the source's display rotation: detection runs in
+    /// DISPLAY orientation (Vision wants faces upright — a portrait
+    /// phone clip stores them sideways), and the boxes are carried back
+    /// to storage space, where covers are drawn. Crops are uprighted
+    /// before feature-printing so they match upright reference photos.
+    static func faces(in image: CGImage, withEmbeddings: Bool,
+                      quarterTurns: Int = 0) throws -> [TrackMath.Detection] {
         let request = VNDetectFaceRectanglesRequest()
-        try VNImageRequestHandler(cgImage: image).perform([request])
+        let orientation = OrientationMap.visionOrientation(quarterTurns: quarterTurns)
+        try VNImageRequestHandler(cgImage: image, orientation: orientation, options: [:])
+            .perform([request])
         var out: [TrackMath.Detection] = []
         for observation in request.results ?? [] {
             let box = observation.boundingBox
+            // Vision's origin is bottom-left in the ORIENTED image; flip
+            // to top-left there, then carry to storage space.
+            let storage = OrientationMap.toStorage(
+                x: box.origin.x, y: 1 - box.origin.y - box.height,
+                width: box.width, height: box.height, quarterTurns: quarterTurns)
             var embedding: [Float] = []
-            if withEmbeddings, let crop = faceCrop(from: image, boundingBox: box) {
-                embedding = (try? featurePrint(of: crop)) ?? []
+            if withEmbeddings {
+                let visionBox = CGRect(x: storage.x, y: 1 - storage.y - storage.height,
+                                       width: storage.width, height: storage.height)
+                if let crop = faceCrop(from: image, boundingBox: visionBox) {
+                    let uprighted = upright(crop, quarterTurns: quarterTurns)
+                    embedding = (try? featurePrint(of: uprighted)) ?? []
+                }
             }
-            // Vision's origin is bottom-left; the fleet reports top-left.
             out.append(TrackMath.Detection(
                 time: 0,
-                x: box.origin.x,
-                y: 1 - box.origin.y - box.height,
-                width: box.width,
-                height: box.height,
+                x: storage.x, y: storage.y,
+                width: storage.width, height: storage.height,
                 embedding: embedding))
         }
         return out
     }
 
+    /// A storage-space crop rotated upright, for feature prints that can
+    /// match upright references.
+    static func upright(_ crop: CGImage, quarterTurns: Int) -> CGImage {
+        guard quarterTurns != 0 else { return crop }
+        let oriented = CIImage(cgImage: crop)
+            .oriented(OrientationMap.uprightingOrientation(quarterTurns: quarterTurns))
+        let moved = oriented.transformed(by: CGAffineTransform(
+            translationX: -oriented.extent.origin.x, y: -oriented.extent.origin.y))
+        return uprightContext.createCGImage(moved, from: moved.extent) ?? crop
+    }
+
+    private static let uprightContext = CIContext()
+
     /// Boxes of recognized lines whose text contains the pattern.
-    static func textBoxes(in image: CGImage, pattern: String) throws -> [TrackMath.Detection] {
+    static func textBoxes(in image: CGImage, pattern: String,
+                          quarterTurns: Int = 0) throws -> [TrackMath.Detection] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
-        try VNImageRequestHandler(cgImage: image).perform([request])
+        let orientation = OrientationMap.visionOrientation(quarterTurns: quarterTurns)
+        try VNImageRequestHandler(cgImage: image, orientation: orientation, options: [:])
+            .perform([request])
         var out: [TrackMath.Detection] = []
         for observation in request.results ?? [] {
             guard let candidate = observation.topCandidates(1).first,
                   TextMatch.matches(candidate.string, pattern: pattern) else { continue }
             let box = observation.boundingBox
+            let storage = OrientationMap.toStorage(
+                x: box.origin.x, y: 1 - box.origin.y - box.height,
+                width: box.width, height: box.height, quarterTurns: quarterTurns)
             out.append(TrackMath.Detection(
                 time: 0,
-                x: box.origin.x,
-                y: 1 - box.origin.y - box.height,
-                width: box.width,
-                height: box.height))
+                x: storage.x, y: storage.y,
+                width: storage.width, height: storage.height))
         }
         return out
     }

@@ -26,12 +26,17 @@ public struct CoverStyle: Sendable, Equatable {
     public var emoji: String
     /// Extra margin around each detected box, as a fraction of its size.
     public var padding: Double
+    /// Diagnostic mode: draw the raw detection and the final cover as
+    /// frames instead of covering — registration made visible.
+    public var outline: Bool
 
     public init(mode: Mode = .blur, intensity: Double = 0.7,
-                emoji: String = "🙂", padding: Double = 0.25) {
+                emoji: String = "🙂", padding: Double = 0.25,
+                outline: Bool = false) {
         self.mode = mode
         self.intensity = intensity
         self.emoji = emoji
         self.padding = padding
+        self.outline = outline
     }
 }

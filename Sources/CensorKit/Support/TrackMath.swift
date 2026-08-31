@@ -116,12 +116,48 @@ public enum TrackMath {
         return out
     }
 
+    /// Below this speed (frame fractions per second) a held cover freezes
+    /// in place; above it, the hold follows the motion.
+    public static let exitSpeedThreshold = 0.05
+
     /// Extends a track `hold` seconds past its last sighting, so a cover
     /// outlives a missed detection instead of flickering off.
+    ///
+    /// A STATIONARY subject's cover freezes where it was — conservative,
+    /// for mid-frame occlusions. A MOVING subject's cover continues along
+    /// its exit velocity instead (the first real clip showed why: a
+    /// walker leaving frame left a stale pixel patch floating over the
+    /// empty doorway), and the hold is cut short once the extrapolated
+    /// box has fully left the frame — nothing there needs covering.
     public static func extend(_ keyframes: [TrackedBox], hold: TimeInterval) -> [TrackedBox] {
         guard hold > 0, let last = keyframes.last else { return keyframes }
+
+        func frozen() -> [TrackedBox] {
+            var held = last
+            held.time = last.time + hold
+            return keyframes + [held]
+        }
+
+        guard keyframes.count >= 2 else { return frozen() }
+        let previous = keyframes[keyframes.count - 2]
+        let dt = last.time - previous.time
+        guard dt > 0 else { return frozen() }
+        let vx = (last.x - previous.x) / dt
+        let vy = (last.y - previous.y) / dt
+        guard (vx * vx + vy * vy).squareRoot() >= exitSpeedThreshold else { return frozen() }
+
+        // Seconds until the box is FULLY outside the frame on its heading.
+        var timeToExit = Double.infinity
+        if vx > 0 { timeToExit = min(timeToExit, (1 - last.x) / vx) }
+        if vx < 0 { timeToExit = min(timeToExit, (last.x + last.width) / -vx) }
+        if vy > 0 { timeToExit = min(timeToExit, (1 - last.y) / vy) }
+        if vy < 0 { timeToExit = min(timeToExit, (last.y + last.height) / -vy) }
+
+        let effectiveHold = min(hold, max(0.1, timeToExit))
         var held = last
-        held.time = last.time + hold
+        held.time = last.time + effectiveHold
+        held.x = last.x + vx * effectiveHold
+        held.y = last.y + vy * effectiveHold
         return keyframes + [held]
     }
 
