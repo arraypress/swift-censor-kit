@@ -24,14 +24,17 @@ public struct CoverStyle: Sendable, Equatable {
     public var intensity: Double
     /// The emoji drawn in `.emoji` mode.
     public var emoji: String
-    /// Extra margin around each detected box, as a fraction of its size.
+    /// User multiplier on the finished cover box: 1 leaves the measured
+    /// cover exactly as sized, larger grows it. Applied ONCE, in the
+    /// renderer — sizing itself (adaptive head extent, or the multiplier
+    /// fallback) happens upstream, so nothing stacks.
     public var padding: Double
     /// Diagnostic mode: draw the raw detection and the final cover as
     /// frames instead of covering — registration made visible.
     public var outline: Bool
 
     public init(mode: Mode = .blur, intensity: Double = 0.7,
-                emoji: String = "🙂", padding: Double = 0.25,
+                emoji: String = "🙂", padding: Double = 1.0,
                 outline: Bool = false) {
         self.mode = mode
         self.intensity = intensity

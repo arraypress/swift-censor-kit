@@ -25,11 +25,17 @@ enum CoverRenderer {
         var rect: CGRect
         /// The raw detection box, for the outline diagnostic.
         var raw: CGRect? = nil
+        /// The face's reading-order number, drawn by the outline
+        /// diagnostic so `--only 2,4` has something to point at.
+        var label: Int? = nil
     }
 
-    /// A cover rect grown by the style's padding.
+    /// A cover rect scaled by the user's padding multiplier. The floor is
+    /// 1 — the sized cover exactly — because sizing already happened
+    /// upstream; this used to ADD 25% by default on top of the geometry
+    /// growth, which is how a specced 2.2× cover rendered at 2.75×.
     static func padded(_ rect: CGRect, padding: Double) -> CGRect {
-        let grow = 1 + max(0, padding)
+        let grow = max(1, padding)
         let w = rect.width * grow
         let h = rect.height * grow
         return CGRect(x: rect.midX - w / 2, y: rect.midY - h / 2, width: w, height: h)
@@ -54,14 +60,53 @@ enum CoverRenderer {
         let thickness = max(2, image.extent.width / 500)
         var out = image
         for cover in covers {
-            out = frame(padded(cover.rect, padding: style.padding),
+            let final = padded(cover.rect, padding: style.padding)
+            out = frame(final,
                         color: CIColor(red: 0, green: 1, blue: 0), thickness: thickness, on: out)
             if let raw = cover.raw {
                 out = frame(raw, color: CIColor(red: 1, green: 0, blue: 0),
                             thickness: thickness, on: out)
             }
+            if let label = cover.label, let digits = renderLabel(label) {
+                let anchor = cover.raw ?? final
+                let side = min(max(28, anchor.height * 0.3), anchor.width)
+                let scale = side / digits.extent.height
+                let placed = digits
+                    .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                let moved = placed.transformed(by: CGAffineTransform(
+                    translationX: anchor.minX - placed.extent.minX,
+                    y: anchor.maxY - side - placed.extent.minY))
+                out = moved.composited(over: out)
+            }
         }
         return out
+    }
+
+    /// A white number on a red backing, for the outline's face labels.
+    static func renderLabel(_ number: Int) -> CIImage? {
+        let side = 256
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(
+                data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              )
+        else { return nil }
+        context.setFillColor(CGColor(red: 0.85, green: 0, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: side, height: side))
+        let font = CTFontCreateWithName("HelveticaNeue-Bold" as CFString, 190, nil)
+        let attributed = NSAttributedString(
+            string: String(number),
+            attributes: [kCTFontAttributeName as NSAttributedString.Key: font,
+                         kCTForegroundColorAttributeName as NSAttributedString.Key:
+                            CGColor(red: 1, green: 1, blue: 1, alpha: 1)])
+        let line = CTLineCreateWithAttributedString(attributed)
+        let bounds = CTLineGetImageBounds(line, context)
+        context.textPosition = CGPoint(
+            x: (CGFloat(side) - bounds.width) / 2 - bounds.minX,
+            y: (CGFloat(side) - bounds.height) / 2 - bounds.minY)
+        CTLineDraw(line, context)
+        guard let cgImage = context.makeImage() else { return nil }
+        return CIImage(cgImage: cgImage)
     }
 
     private static func frame(_ rect: CGRect, color: CIColor, thickness: CGFloat,
@@ -143,14 +188,22 @@ enum CoverRenderer {
         case .mask(let provided):
             return provided.cropped(to: extent)
         case .oval:
-            let radius = max(face.width, face.height) / 2
+            // A true ELLIPSE, not a circle sized to the longer side: an
+            // adaptive head box is taller than wide, and a circular mask
+            // over it either overflows sideways or clips the chin. The
+            // gradient is built in unit space and scaled per-axis; the
+            // soft feathered edge is also what keeps a large cover from
+            // reading as a hard pasted block.
             let gradient = CIFilter(name: "CIRadialGradient")
-            gradient?.setValue(CIVector(x: face.midX, y: face.midY), forKey: "inputCenter")
-            gradient?.setValue(radius * 0.72, forKey: "inputRadius0")
-            gradient?.setValue(radius * 1.05, forKey: "inputRadius1")
+            gradient?.setValue(CIVector(x: 0, y: 0), forKey: "inputCenter")
+            gradient?.setValue(0.78, forKey: "inputRadius0")
+            gradient?.setValue(1.05, forKey: "inputRadius1")
             gradient?.setValue(CIColor(red: 1, green: 1, blue: 1, alpha: 1), forKey: "inputColor0")
             gradient?.setValue(CIColor(red: 0, green: 0, blue: 0, alpha: 1), forKey: "inputColor1")
-            return (gradient?.outputImage ?? CIImage(color: .black)).cropped(to: extent)
+            let unit = gradient?.outputImage ?? CIImage(color: .black)
+            let transform = CGAffineTransform(translationX: face.midX, y: face.midY)
+                .scaledBy(x: face.width / 2, y: face.height / 2)
+            return unit.transformed(by: transform).cropped(to: extent)
         case .rectangle:
             return CIImage(color: .white)
                 .cropped(to: face)

@@ -188,7 +188,7 @@ final class CensorKitTests: XCTestCase {
         let region = Region(x: 0.3, y: 0.3, width: 0.4, height: 0.4)
         let outcome = try ImageCensor.censor(
             imageAt: input, target: .regions([region]),
-            style: CoverStyle(mode: .blur, intensity: 1, padding: 0),
+            style: CoverStyle(mode: .blur, intensity: 1, padding: 1),
             to: output, dryRun: false)
         XCTAssertEqual(outcome.status, .covered)
         XCTAssertEqual(outcome.covers, 1)
@@ -274,7 +274,7 @@ final class CensorKitTests: XCTestCase {
         let outcome = try await VideoCensor.censor(
             videoAt: input,
             target: .regions([Region(x: 0.3, y: 0.3, width: 0.4, height: 0.4)]),
-            style: CoverStyle(mode: .blur, intensity: 1, padding: 0),
+            style: CoverStyle(mode: .blur, intensity: 1, padding: 1),
             to: output, dryRun: false)
         XCTAssertEqual(outcome.status, .covered)
 
@@ -442,7 +442,7 @@ final class CensorKitTests: XCTestCase {
 
         let output = dir.appendingPathComponent("rotated-censored.mov")
         let outcome = try await VideoCensor.censor(
-            videoAt: input, target: .faces(except: [], only: []),
+            videoAt: input, target: .faces(FaceSelection()),
             style: CoverStyle(mode: .pixelate, intensity: 1),
             to: output, dryRun: false,
             options: VideoCensor.Options(detectStride: 0.15, hold: 0.3))
@@ -649,6 +649,150 @@ final class CensorKitTests: XCTestCase {
         XCTAssertEqual(written.transfer, "ITU_R_2100_HLG", "HLG is not flattened to SDR")
     }
 
+    // MARK: - Tiling, ordering, selection, head extent, gaps
+
+    func testTilingGridAndMapping() {
+        let tiles = Tiling.grid(3, overlap: 0.2)
+        XCTAssertEqual(tiles.count, 9)
+        for tile in tiles {
+            XCTAssertGreaterThanOrEqual(tile.x, 0)
+            XCTAssertLessThanOrEqual(tile.x + tile.width, 1.0 + 1e-9)
+            XCTAssertLessThanOrEqual(tile.y + tile.height, 1.0 + 1e-9)
+        }
+        let side = tiles[0].width
+        let step = tiles[1].x - tiles[0].x
+        XCTAssertEqual(side - step, side * 0.2, accuracy: 1e-9, "neighbours share the overlap")
+        XCTAssertEqual(Tiling.grid(1), [Tiling.Tile(x: 0, y: 0, width: 1, height: 1)])
+
+        let tile = Tiling.Tile(x: 0.5, y: 0.25, width: 0.4, height: 0.4)
+        let framed = Tiling.toFrame(x: 0.25, y: 0.5, width: 0.5, height: 0.25, tile: tile)
+        XCTAssertEqual(framed.x, 0.6, accuracy: 1e-9)
+        XCTAssertEqual(framed.y, 0.45, accuracy: 1e-9)
+        XCTAssertEqual(framed.width, 0.2, accuracy: 1e-9)
+        XCTAssertEqual(framed.height, 0.1, accuracy: 1e-9)
+    }
+
+    func testTilingMergeDropsDuplicatesKeepsDistinct() {
+        let big = TrackMath.Detection(time: 0, x: 0.10, y: 0.10, width: 0.20, height: 0.20)
+        let dupe = TrackMath.Detection(time: 0, x: 0.11, y: 0.11, width: 0.18, height: 0.18)
+        let other = TrackMath.Detection(time: 0, x: 0.70, y: 0.70, width: 0.10, height: 0.10)
+        let merged = Tiling.merge([dupe, big, other])
+        XCTAssertEqual(merged.count, 2)
+        XCTAssertEqual(merged[0].width, 0.20, accuracy: 1e-9, "the larger of a duplicate pair wins")
+    }
+
+    func testFaceOrderingReadsLeftToRight() {
+        let a = TrackMath.Detection(time: 0, x: 0.6, y: 0.2, width: 0.1, height: 0.1)
+        let b = TrackMath.Detection(time: 0, x: 0.1, y: 0.5, width: 0.1, height: 0.1)
+        let c = TrackMath.Detection(time: 0, x: 0.605, y: 0.6, width: 0.1, height: 0.1)
+        let ordered = FaceOrdering.ordered([a, c, b])
+        XCTAssertEqual(ordered[0].x, 0.1, "leftmost is number 1")
+        XCTAssertEqual(ordered[1].y, 0.2, "a near-tied column falls back to top-to-bottom")
+        XCTAssertEqual(ordered[2].y, 0.6)
+    }
+
+    func testFaceSelectionComposes() {
+        let ref: [Float] = [1, 0, 0, 0]
+        let matching: [Float] = [1, 0.5, 0, 0]
+        let stranger: [Float] = [3, 3, 3, 3]
+
+        let numbersOnly = FaceSelection(onlyNumbers: [2, 4])
+        XCTAssertTrue(numbersOnly.usesNumbers)
+        XCTAssertFalse(numbersOnly.wantsIdentity)
+        XCTAssertTrue(numbersOnly.shouldCover(number: 2, embedding: []))
+        XCTAssertFalse(numbersOnly.shouldCover(number: 3, embedding: []))
+
+        let skip = FaceSelection(skipNumbers: [1])
+        XCTAssertFalse(skip.shouldCover(number: 1, embedding: []))
+        XCTAssertTrue(skip.shouldCover(number: 2, embedding: []))
+
+        let both = FaceSelection(except: [ref], onlyNumbers: [1, 2])
+        XCTAssertFalse(both.shouldCover(number: 1, embedding: matching), "matches --except")
+        XCTAssertTrue(both.shouldCover(number: 1, embedding: stranger))
+        XCTAssertFalse(both.shouldCover(number: 3, embedding: stranger), "outside --only numbers")
+
+        XCTAssertFalse(FaceSelection().isSelective)
+    }
+
+    func testHeadExtentMeasuresTheComponentAndCutsTheTorso() throws {
+        // A 10×12 grid: a 2-wide head column with hair above the face,
+        // a neck running down into a 6-wide shoulder slab.
+        let width = 10, height = 12
+        var mask = [Bool](repeating: false, count: width * height)
+        func fill(_ xs: ClosedRange<Int>, _ ys: ClosedRange<Int>) {
+            for y in ys { for x in xs { mask[y * width + x] = true } }
+        }
+        fill(4...5, 1...4)
+        fill(4...5, 5...11)
+        fill(2...7, 8...11)
+        let face = (x: 0.4, y: 0.2, width: 0.2, height: 0.2)
+        let head = try XCTUnwrap(HeadExtent.headBox(
+            mask: mask, width: width, height: height, face: face))
+        XCTAssertEqual(head.y, 1.0 / 12, accuracy: 1e-9, "the hair above the face is covered")
+        XCTAssertEqual(head.width, 0.2, accuracy: 1e-9, "the head stays head-wide")
+        XCTAssertLessThan(head.y + head.height, 0.8, "the shoulder slab is cut away")
+
+        XCTAssertNil(HeadExtent.headBox(
+            mask: [Bool](repeating: false, count: width * height),
+            width: width, height: height, face: face),
+            "no mask under the face means no measured head")
+
+        let margined = HeadExtent.withMargin((x: 0.45, y: 0.1, width: 0.2, height: 0.4), margin: 1.1)
+        XCTAssertEqual(margined.width, 0.22, accuracy: 1e-9)
+        XCTAssertEqual(margined.height, 0.44, accuracy: 1e-9)
+    }
+
+    func testCoverageGaps() {
+        let duration = 10.0
+        let exiting = Track(id: 0, keyframes: [
+            TrackedBox(time: 0, x: 0.7, y: 0.4, width: 0.2, height: 0.2),
+            TrackedBox(time: 1, x: 0.85, y: 0.4, width: 0.2, height: 0.2)])
+        let lost = Track(id: 1, keyframes: [
+            TrackedBox(time: 2, x: 0.4, y: 0.4, width: 0.1, height: 0.1),
+            TrackedBox(time: 3, x: 0.41, y: 0.4, width: 0.1, height: 0.1)])
+        let reacquired = Track(id: 2, keyframes: [
+            TrackedBox(time: 4.2, x: 0.43, y: 0.41, width: 0.1, height: 0.1),
+            TrackedBox(time: 9.95, x: 0.43, y: 0.41, width: 0.1, height: 0.1)])
+        let vanished = Track(id: 3, keyframes: [
+            TrackedBox(time: 5, x: 0.1, y: 0.7, width: 0.15, height: 0.15),
+            TrackedBox(time: 6, x: 0.12, y: 0.7, width: 0.15, height: 0.15)])
+        let gaps = TrackMath.gaps(in: [exiting, lost, reacquired, vanished], duration: duration)
+        XCTAssertEqual(gaps.count, 2)
+        XCTAssertEqual(gaps[0].track, 1)
+        XCTAssertEqual(gaps[0].start, 3, accuracy: 1e-9)
+        XCTAssertEqual(gaps[0].end, 4.2, accuracy: 1e-9, "review ends at the re-acquisition")
+        XCTAssertEqual(gaps[1].track, 3)
+        XCTAssertEqual(gaps[1].end, duration, accuracy: 1e-9, "never re-acquired: review to the end")
+    }
+
+    func testTiledPassFindsAFaceTheFullFrameMayMiss() throws {
+        guard let fixtures else { throw XCTSkip("no face fixtures on this machine") }
+        let url = fixtures.appendingPathComponent("businesswoman-isolated.jpg")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("fixture businesswoman-isolated.jpg missing")
+        }
+        let portrait = CGImageSourceCreateImageAtIndex(
+            CGImageSourceCreateWithURL(url as CFURL, nil)!, 0, nil)!
+        let side = 3200
+        let sprite = 600.0
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        let context = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8,
+                                bytesPerRow: 0, space: space,
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 0.35, green: 0.4, blue: 0.35, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: side, height: side))
+        let scale = sprite / Double(portrait.height)
+        context.draw(portrait, in: CGRect(x: 400, y: 2400,
+                                          width: Double(portrait.width) * scale, height: sprite))
+        let canvas = context.makeImage()!
+
+        let thorough = try Detector.facesThorough(in: canvas, withEmbeddings: false)
+        XCTAssertGreaterThanOrEqual(thorough.count, 1, "the tiled pass finds the small face")
+        let plain = try Detector.faces(in: canvas, withEmbeddings: false)
+        XCTAssertGreaterThanOrEqual(thorough.count, plain.count,
+                                    "tiling never loses what the full frame saw")
+    }
+
     // MARK: - Real faces (gated on the local fixtures folder)
 
     private var fixtures: URL? {
@@ -721,8 +865,8 @@ final class CensorKitTests: XCTestCase {
         let embedding = try References.embedding(fromImageAt: reference)
         let output = dir.appendingPathComponent("pair-censored.png")
         let outcome = try ImageCensor.censor(
-            imageAt: canvasURL, target: .faces(except: [embedding], only: []),
-            style: CoverStyle(mode: .pixelate, intensity: 1, padding: 0.1),
+            imageAt: canvasURL, target: .faces(FaceSelection(except: [embedding])),
+            style: CoverStyle(mode: .pixelate, intensity: 1, padding: 1.1),
             to: output, dryRun: false)
 
         XCTAssertEqual(outcome.status, .covered)

@@ -28,13 +28,17 @@ public struct FileOutcome: Sendable, Codable, Equatable {
     public var covers: Int
     /// The reason for a skip or failure, or a match summary.
     public var detail: String?
+    /// Video only: windows where a tracked subject may be present but
+    /// uncovered — the seconds a human should review.
+    public var gaps: [CoverageGap]?
 
     public init(input: String, output: String? = nil, status: Status,
-                covers: Int = 0, detail: String? = nil) {
+                covers: Int = 0, detail: String? = nil, gaps: [CoverageGap]? = nil) {
         self.input = input
         self.output = output
         self.status = status
         self.covers = covers
         self.detail = detail
+        self.gaps = gaps
     }
 }

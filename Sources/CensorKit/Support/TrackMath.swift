@@ -161,6 +161,43 @@ public enum TrackMath {
         return keyframes + [held]
     }
 
+    /// How near the frame edge a lost box counts as having exited.
+    public static let edgeTolerance = 0.02
+
+    /// The windows the tool cannot vouch for: a track lost MID-FRAME (not
+    /// out an edge) before the video ends may mean the person left — or
+    /// that detection failed while they stayed. Each gap runs from the
+    /// cover's expiry to the first later track starting nearby (the
+    /// re-acquisition) or the video's end. Honest reporting beats a
+    /// longer guess.
+    public static func gaps(
+        in tracks: [Track], duration: TimeInterval
+    ) -> [CoverageGap] {
+        var out: [CoverageGap] = []
+        for track in tracks {
+            guard let last = track.keyframes.last else { continue }
+            if last.time >= duration - 0.1 { continue }
+            if last.x <= edgeTolerance || last.y <= edgeTolerance
+                || last.x + last.width >= 1 - edgeTolerance
+                || last.y + last.height >= 1 - edgeTolerance { continue }
+            let cx = last.x + last.width / 2
+            let cy = last.y + last.height / 2
+            var end = duration
+            for other in tracks where other.id != track.id {
+                guard let first = other.keyframes.first, first.time > last.time else { continue }
+                let dx = (first.x + first.width / 2) - cx
+                let dy = (first.y + first.height / 2) - cy
+                if (dx * dx + dy * dy).squareRoot() <= maxJump {
+                    end = min(end, first.time)
+                }
+            }
+            if end > last.time + 0.01 {
+                out.append(CoverageGap(track: track.id, start: last.time, end: end))
+            }
+        }
+        return out.sorted { $0.start < $1.start }
+    }
+
     /// The linearly interpolated box at `time`, or nil outside the track.
     public static func box(at time: TimeInterval, in keyframes: [TrackedBox]) -> TrackedBox? {
         guard let first = keyframes.first, let last = keyframes.last,

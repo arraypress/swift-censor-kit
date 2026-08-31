@@ -33,19 +33,24 @@ public enum ImageCensor {
         var detail: String?
 
         switch target {
-        case .faces(let except, let only):
-            let wantIdentity = !except.isEmpty || !only.isEmpty
-            let detections = try Detector.faces(in: cgImage, withEmbeddings: wantIdentity)
+        case .faces(let selection):
+            // Full-frame plus tiles (big stills), in reading order so the
+            // numbers --outline draws are the numbers --only takes.
+            let detections = FaceOrdering.ordered(
+                try Detector.facesThorough(in: cgImage, withEmbeddings: selection.wantsIdentity))
             var kept = 0
-            for detection in detections {
-                let cover = wantIdentity
-                    ? FaceMatching.shouldCover(detection.embedding, except: except, only: only)
-                    : true
-                guard cover else { kept += 1; continue }
-                // Vision's box is eyes-nose-mouth; the cover takes the head.
-                let head = FaceGeometry.coverBox(
-                    x: detection.x, y: detection.y,
-                    width: detection.width, height: detection.height)
+            for (index, detection) in detections.enumerated() {
+                let number = index + 1
+                guard selection.shouldCover(number: number, embedding: detection.embedding)
+                else { kept += 1; continue }
+                // The cover is the MEASURED head where segmentation sees
+                // one, the multiplier guess where it does not.
+                let head = Detector.adaptiveHeadBox(
+                    in: cgImage, face: detection, quarterTurns: 0,
+                    margin: HeadExtent.stillMargin)
+                    ?? FaceGeometry.coverBox(
+                        x: detection.x, y: detection.y,
+                        width: detection.width, height: detection.height)
                 covers.append(.init(
                     shape: .oval,
                     rect: CoverRenderer.coverRect(
@@ -53,10 +58,11 @@ public enum ImageCensor {
                         width: head.width, height: head.height, in: image.extent),
                     raw: CoverRenderer.coverRect(
                         x: detection.x, y: detection.y,
-                        width: detection.width, height: detection.height, in: image.extent)))
+                        width: detection.width, height: detection.height, in: image.extent),
+                    label: number))
             }
-            if wantIdentity {
-                detail = "\(detections.count) faces, \(kept) left uncovered by reference match"
+            if selection.isSelective {
+                detail = "\(detections.count) faces, \(kept) left uncovered by selection"
             }
 
         case .person(let only):

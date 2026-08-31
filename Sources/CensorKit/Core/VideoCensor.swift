@@ -35,12 +35,16 @@ public enum VideoCensor {
         public var hold: TimeInterval
         /// Smoothing weight of each NEW sample (1 = none).
         public var smoothing: Double
+        /// Adds the tiled detection pass to every sample — small
+        /// background faces at a real cost; measured in the README.
+        public var thorough: Bool
 
         public init(detectStride: TimeInterval = 0.25, hold: TimeInterval = 0.75,
-                    smoothing: Double = 0.5) {
+                    smoothing: Double = 0.5, thorough: Bool = false) {
             self.detectStride = detectStride
             self.hold = hold
             self.smoothing = smoothing
+            self.thorough = thorough
         }
     }
 
@@ -65,18 +69,44 @@ public enum VideoCensor {
         var tracks: [Track] = []
         var analysisDetail: String?
         switch target {
-        case .faces(let except, let only):
-            let wantIdentity = !except.isEmpty || !only.isEmpty
+        case .faces(let selection):
+            if selection.usesNumbers {
+                throw CensorError.usage(
+                    "numbered face selection works on images — on video, select with reference photos")
+            }
+            let wantIdentity = selection.wantsIdentity
             let samples = try await sampleDetections(
                 asset: asset, track: videoTrack, stride: options.detectStride, context: context
             ) { image in
-                try Detector.faces(in: image, withEmbeddings: wantIdentity, quarterTurns: turns)
+                let found = options.thorough
+                    ? try Detector.facesThorough(in: image, withEmbeddings: wantIdentity,
+                                                 quarterTurns: turns, force: true)
+                    : try Detector.faces(in: image, withEmbeddings: wantIdentity,
+                                         quarterTurns: turns)
+                // Size the cover at sample time and TRACK the head boxes:
+                // the render pass then draws tracks verbatim, and the
+                // video margin leads a moving head instead of trailing it.
+                return found.map { detection in
+                    var head = detection
+                    let sized = Detector.adaptiveHeadBox(
+                        in: image, face: detection, quarterTurns: turns,
+                        margin: HeadExtent.videoMotionMargin)
+                        ?? FaceGeometry.coverBox(
+                            x: detection.x, y: detection.y,
+                            width: detection.width, height: detection.height)
+                    head.x = sized.x
+                    head.y = sized.y
+                    head.width = sized.width
+                    head.height = sized.height
+                    return head
+                }
             }
             var all = TrackMath.associate(samples)
             if wantIdentity {
                 let before = all.count
                 all = all.filter {
-                    FaceMatching.shouldCover($0.embedding, except: except, only: only)
+                    FaceMatching.shouldCover($0.embedding,
+                                             except: selection.except, only: selection.only)
                 }
                 analysisDetail = "\(before) face tracks, \(before - all.count) left uncovered by reference match"
             }
@@ -103,6 +133,9 @@ public enum VideoCensor {
             break
         }
 
+        let reviewGaps = TrackMath.gaps(in: tracks, duration: duration.seconds)
+        let gapsOrNil = reviewGaps.isEmpty ? nil : reviewGaps
+
         if dryRun {
             let covers: Int
             var detail = analysisDetail
@@ -117,7 +150,8 @@ public enum VideoCensor {
                 covers = seen
                 detail = "people present in \(seen) of 5 sampled frames"
             }
-            return FileOutcome(input: url.path, status: .wouldCover, covers: covers, detail: detail)
+            return FileOutcome(input: url.path, status: .wouldCover, covers: covers,
+                               detail: detail, gaps: gapsOrNil)
         }
 
         let isPerson: Bool
@@ -282,7 +316,8 @@ public enum VideoCensor {
         return FileOutcome(
             input: url.path, output: output.path, status: .covered,
             covers: max(coverCount, regionCount),
-            detail: analysisDetail ?? "\(counters.covered) of \(counters.frames) frames covered")
+            detail: analysisDetail ?? "\(counters.covered) of \(counters.frames) frames covered",
+            gaps: gapsOrNil)
     }
 
     // MARK: - The feeding machinery
@@ -387,16 +422,13 @@ public enum VideoCensor {
                     }
                 }
             default:
+                // Tracks already carry sized head boxes (adaptive or
+                // fallback, applied at sample time) — draw them as they
+                // are. The outline diagnostic on video shows that one box.
                 return tracks.compactMap { track in
                     track.box(at: t).map { box in
-                        let head = FaceGeometry.coverBox(
-                            x: box.x, y: box.y, width: box.width, height: box.height)
-                        return .init(
-                            shape: .oval,
-                            rect: CoverRenderer.coverRect(
-                                x: head.x, y: head.y,
-                                width: head.width, height: head.height, in: extent),
-                            raw: CoverRenderer.coverRect(
+                        .init(shape: .oval,
+                              rect: CoverRenderer.coverRect(
                                 x: box.x, y: box.y,
                                 width: box.width, height: box.height, in: extent))
                     }

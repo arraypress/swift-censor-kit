@@ -11,8 +11,9 @@ import Foundation
 /// the CLI extracts them from reference photos before the batch starts,
 /// so the engine never re-reads a reference per file.
 public enum CensorTargetSpec: Sendable {
-    /// Every face, minus `except`, or restricted to `only`.
-    case faces(except: [[Float]], only: [[Float]])
+    /// Every face, filtered by ``FaceSelection`` — reference photos,
+    /// outline numbers, or nothing (cover everyone).
+    case faces(FaceSelection)
     /// Whole people by segmentation; `only` selects the Nth largest
     /// instance (1-based) where instance masks are available.
     case person(only: Int?)
