@@ -26,6 +26,7 @@ let outcome = try await VideoCensor.censor(
 | Case | Result |
 |---|---|
 | 10 s 1080p30 video, faces, any mode | 2.3–2.5 s wall (~4× realtime), 300/300 frames covered |
+| 12 s 4K24 iPhone HDR (HEVC 10-bit HLG, 31 Mb/s), faces | 10.9 s end to end — analysis and render |
 | Stills with one face | ~26 images/s |
 | Region `@2-6` on a 30 fps clip | exactly 121 of 300 frames covered |
 | Audio | float32 LPCM 22050 Hz passed through bit-format-identical |
@@ -33,6 +34,7 @@ let outcome = try await VideoCensor.censor(
 ## The contract
 
 - Output is always a new file; the engine never opens an original for writing. Video lands in `.mov` (the container the audio passthrough guarantees), stills keep their format and color space; orientation is baked in on load.
+- **Quality parity**: the writer is configured from the source — same codec (HEVC in, HEVC out), bitrate never below the source's estimate, 10-bit stays 10-bit (HEVC Main10), color tags copied whole (iPhone HDR stays BT.2020/HLG), frame rate and rotation preserved, and audio plus timed-metadata tracks pass through untouched. Verified on a real iPhone 4K HDR clip: the censored copy's format story matches the source field for field. The one honest exception: Dolby Vision dynamic metadata does not survive any re-encode — output remains correct HLG/HDR10-style HDR, without the per-scene Dolby layer.
 - `SCAGate` wraps Apple's SensitiveContentAnalysis (images and, on this SDK, video files). It judges whole files only and answers only where its policy allows; everything else reports that honestly rather than guessing.
 - **What this cannot do**: no Apple API localizes body parts, so there is no automatic NSFW-region covering — the honest workflow is SCA's whole-file flag plus person/region covers.
 
