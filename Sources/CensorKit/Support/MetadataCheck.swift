@@ -64,3 +64,72 @@ public enum MetadataCheck {
         }
     }
 }
+
+// MARK: - Video
+
+import AVFoundation
+
+extension MetadataCheck {
+
+    /// The words in a metadata identifier that mark it as identifying.
+    static let identifyingVideoKeys = ["location", "iso6709", "gps", "make", "model", "author", "artist",
+                                       "copyright", "owner", "serial", "detected-face", "face"]
+
+    /// The kinds of identifying metadata in a video file, by name.
+    ///
+    /// Two places carry it: the container, where an iPhone writes the
+    /// location and the camera, and timed metadata tracks, where a phone or
+    /// a drone can write where it was every moment and where the faces in
+    /// the frame were. Kinds, never values.
+    ///
+    /// - Parameter url: The video to read.
+    /// - Returns: "location", "camera", "author", "timed location",
+    ///   "timed faces", "timed identifying data" — whichever are present.
+    public static func videoLeaks(in url: URL) async -> [String] {
+        let asset = AVURLAsset(url: url)
+        var found: [String] = []
+        var items: [AVMetadataItem] = (try? await asset.load(.metadata)) ?? []
+        for format in (try? await asset.load(.availableMetadataFormats)) ?? [] {
+            items += (try? await asset.loadMetadata(for: format)) ?? []
+        }
+        let identifiers = items.compactMap { $0.identifier?.rawValue.lowercased() }
+        if identifiers.contains(where: { $0.contains("location") || $0.contains("iso6709") || $0.contains("gps") }) {
+            found.append("location")
+        }
+        if identifiers.contains(where: { $0.contains("make") || $0.contains("model") || $0.contains("serial") }) {
+            found.append("camera")
+        }
+        if identifiers.contains(where: { $0.contains("author") || $0.contains("artist") || $0.contains("owner")
+            || $0.contains("copyright") }) {
+            found.append("author")
+        }
+        for track in (try? await asset.loadTracks(withMediaType: .metadata)) ?? [] {
+            let timed = timedIdentifiers(of: track, descriptions: (try? await track.load(.formatDescriptions)) ?? [])
+            if timed.contains(where: { $0.contains("location") || $0.contains("iso6709") || $0.contains("gps") }) {
+                found.append("timed location")
+            } else if timed.contains(where: { $0.contains("face") }) {
+                found.append("timed faces")
+            } else if timed.contains(where: { id in identifyingVideoKeys.contains { id.contains($0) } }) {
+                found.append("timed identifying data")
+            }
+        }
+        return Array(NSOrderedSet(array: found)) as? [String] ?? found
+    }
+
+    /// The identifiers a timed metadata track declares, lowercased.
+    static func timedIdentifiers(of track: AVAssetTrack, descriptions: [CMFormatDescription]) -> [String] {
+        descriptions.flatMap { description in
+            (CMMetadataFormatDescriptionGetIdentifiers(description) as? [String] ?? []).map { $0.lowercased() }
+        }
+    }
+
+    /// Whether a timed metadata track carries anything identifying — the
+    /// ones a censored copy must not keep.
+    static func isIdentifying(_ descriptions: [CMFormatDescription]) -> Bool {
+        descriptions.contains { description in
+            (CMMetadataFormatDescriptionGetIdentifiers(description) as? [String] ?? []).contains { id in
+                identifyingVideoKeys.contains { id.lowercased().contains($0) }
+            }
+        }
+    }
+}

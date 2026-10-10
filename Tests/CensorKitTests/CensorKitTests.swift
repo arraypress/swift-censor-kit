@@ -317,6 +317,76 @@ final class CensorKitTests: XCTestCase {
         XCTAssertEqual(writer.status, .completed)
     }
 
+    /// A clip carrying what an iPhone video carries about its maker: where it
+    /// was shot and on what, in the container AND as a timed metadata track.
+    private func makeTaggedVideo(at url: URL) throws {
+        let plain = url.deletingLastPathComponent().appendingPathComponent("plain-\(UUID().uuidString).mov")
+        try makeVideo(at: plain)
+        defer { try? FileManager.default.removeItem(at: plain) }
+
+        func item(_ identifier: String, _ value: String) -> AVMutableMetadataItem {
+            let item = AVMutableMetadataItem()
+            item.identifier = AVMetadataIdentifier(identifier)
+            item.value = value as NSString
+            item.dataType = kCMMetadataBaseDataType_UTF8 as String
+            return item
+        }
+        let location = "mdta/com.apple.quicktime.location.ISO6709"
+
+        let source = AVURLAsset(url: plain)
+        let reader = try AVAssetReader(asset: source)
+        let videoTrack = source.tracks(withMediaType: .video)[0]
+        let readerOutput = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: nil)
+        reader.add(readerOutput)
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        writer.metadata = [item(location, "+51.5007-000.1246/"), item("mdta/com.apple.quicktime.make", "Apple"),
+                           item("mdta/com.apple.quicktime.model", "iPhone 17 Pro")]
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil,
+                                            sourceFormatHint: videoTrack.formatDescriptions.first as! CMFormatDescription)
+        writer.add(videoInput)
+        // A timed track that says where, every moment of the clip.
+        let spec = [kCMMetadataFormatDescriptionMetadataSpecificationKey_Identifier: location,
+                    kCMMetadataFormatDescriptionMetadataSpecificationKey_DataType: kCMMetadataBaseDataType_UTF8] as NSDictionary
+        var description: CMFormatDescription?
+        CMMetadataFormatDescriptionCreateWithMetadataSpecifications(allocator: nil, metadataType: kCMMetadataFormatType_Boxed,
+                                                                   metadataSpecifications: [spec] as CFArray, formatDescriptionOut: &description)
+        let metadataInput = AVAssetWriterInput(mediaType: .metadata, outputSettings: nil, sourceFormatHint: description)
+        let adaptor = AVAssetWriterInputMetadataAdaptor(assetWriterInput: metadataInput)
+        writer.add(metadataInput)
+
+        reader.startReading()
+        XCTAssertTrue(writer.startWriting())
+        writer.startSession(atSourceTime: .zero)
+        adaptor.append(AVTimedMetadataGroup(items: [item(location, "+51.5007-000.1246/")],
+                                            timeRange: CMTimeRange(start: .zero, duration: CMTime(value: 1, timescale: 1))))
+        metadataInput.markAsFinished()
+        while let sample = readerOutput.copyNextSampleBuffer() {
+            while !videoInput.isReadyForMoreMediaData { usleep(2000) }
+            videoInput.append(sample)
+        }
+        videoInput.markAsFinished()
+        let done = XCTestExpectation(description: "written")
+        writer.finishWriting { done.fulfill() }
+        wait(for: [done], timeout: 30)
+        XCTAssertEqual(writer.status, .completed, "\(String(describing: writer.error))")
+    }
+
+    func testACoveredVideoKeepsNoLocationOrCamera() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("censor-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appendingPathComponent("clip.mov")
+        try makeTaggedVideo(at: input)
+        let before = await MetadataCheck.videoLeaks(in: input)
+        XCTAssertTrue(Set(before).isSuperset(of: ["location", "camera", "timed location"]), "the fixture carries \(before)")
+
+        let output = dir.appendingPathComponent("clip-censored.mov")
+        _ = try await VideoCensor.censor(videoAt: input, target: .regions([Region(x: 0.3, y: 0.3, width: 0.4, height: 0.4)]),
+                                         style: CoverStyle(mode: .blur, intensity: 1, padding: 1), to: output, dryRun: false)
+        let after = await MetadataCheck.videoLeaks(in: output)
+        XCTAssertEqual(after, [], "the censored clip still carries \(after)")
+    }
+
     func testVideoRegionCoverAndContainerContract() async throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("censor-\(UUID().uuidString)")

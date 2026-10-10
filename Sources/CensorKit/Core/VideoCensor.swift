@@ -18,7 +18,8 @@
 //  was nine minutes of spinning on an audio input the writer had
 //  politely paused. Audio and timed-metadata tracks pass through
 //  untouched (re-encoding rejects float32 LPCM; iPhone clips carry mebx
-//  metadata worth keeping).
+//  metadata worth keeping) — all but timed tracks that identify, which
+//  are dropped, and every output is re-read by MetadataCheck.
 //
 
 import AVFoundation
@@ -231,10 +232,16 @@ public enum VideoCensor {
                 kCVPixelBufferHeightKey as String: height,
             ])
 
-        // Audio and timed metadata: passthrough, format hints from the source.
+        // Audio and timed metadata: passthrough, format hints from the source
+        // — except a timed track that says where the camera was or where the
+        // faces were. Those passed straight through until 2026-10-10: the
+        // container's location was dropped, a timed location track was not.
+        writer.metadata = []
         for track in try await asset.load(.tracks) where track.mediaType != .video {
             guard track.mediaType == .audio || track.mediaType == .metadata else { continue }
-            let hint = try await track.load(.formatDescriptions).first
+            let descriptions = try await track.load(.formatDescriptions)
+            if track.mediaType == .metadata, MetadataCheck.isIdentifying(descriptions) { continue }
+            let hint = descriptions.first
             let input = AVAssetWriterInput(mediaType: track.mediaType,
                                            outputSettings: nil, sourceFormatHint: hint)
             guard writer.canAdd(input) else { continue }
@@ -308,6 +315,13 @@ public enum VideoCensor {
         await writer.finishWriting()
         guard writer.status == .completed else {
             throw CensorError.io("finishing \(output.lastPathComponent) failed: \(writer.error?.localizedDescription ?? "unknown")")
+        }
+        // Checked, not assumed: a censored clip for sharing that still says
+        // where it was shot is removed and refused.
+        let leaks = await MetadataCheck.videoLeaks(in: output)
+        guard leaks.isEmpty else {
+            try? FileManager.default.removeItem(at: output)
+            throw CensorError.processing("\(output.lastPathComponent) still carried \(leaks.joined(separator: ", ")) metadata; nothing was written")
         }
 
         let coverCount = isPerson ? counters.covered : tracks.count
