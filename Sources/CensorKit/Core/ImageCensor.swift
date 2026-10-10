@@ -110,6 +110,11 @@ public enum ImageCensor {
     private static func write(_ image: CIImage, from source: CIImage, to output: URL,
                               context: CIContext) throws {
         let space = source.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        // The source's properties ride through every filter and Core Image
+        // writes them back: GPS, camera, serial number and author survived a
+        // blur until this. Orientation is already in the pixels (the read
+        // applied it), so nothing worth keeping goes with them.
+        let image = image.settingProperties([:])
         try FileManager.default.createDirectory(
             at: output.deletingLastPathComponent(), withIntermediateDirectories: true)
         switch output.pathExtension.lowercased() {
@@ -123,6 +128,13 @@ public enum ImageCensor {
                 options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.92])
         default:
             try context.writePNGRepresentation(of: image, to: output, format: .RGBA8, colorSpace: space)
+        }
+        // Checked, not assumed: a copy for sharing that still says where it
+        // was taken is removed and refused.
+        let leaks = MetadataCheck.leaks(in: output)
+        guard leaks.isEmpty else {
+            try? FileManager.default.removeItem(at: output)
+            throw CensorError.processing("\(output.lastPathComponent) still carried \(leaks.joined(separator: ", ")) metadata; nothing was written")
         }
     }
 }

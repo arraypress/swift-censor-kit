@@ -206,6 +206,61 @@ final class CensorKitTests: XCTestCase {
                        "outside the cover stays byte-identical")
     }
 
+    /// A JPEG carrying everything a shared photo should not: where it was
+    /// taken, the camera and its serial number, and who took it.
+    private func makeTaggedJPEG(at url: URL) throws {
+        let png = url.deletingPathExtension().appendingPathExtension("png")
+        try makeQuadrantImage(at: png)
+        let source = CGImageSourceCreateWithURL(png as CFURL, nil)!
+        let image = CGImageSourceCreateImageAtIndex(source, 0, nil)!
+        let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil)!
+        let properties: [CFString: Any] = [
+            kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 51.5007, kCGImagePropertyGPSLatitudeRef: "N",
+                                            kCGImagePropertyGPSLongitude: 0.1246, kCGImagePropertyGPSLongitudeRef: "W"],
+            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFMake: "Apple", kCGImagePropertyTIFFModel: "iPhone 17 Pro",
+                                             kCGImagePropertyTIFFArtist: "Someone"],
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifBodySerialNumber: "C39XK2ABCDEF",
+                                             kCGImagePropertyExifDateTimeOriginal: "2026:10:10 09:00:00"],
+            kCGImagePropertyIPTCDictionary: [kCGImagePropertyIPTCByline: ["Someone"]],
+        ]
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        try FileManager.default.removeItem(at: png)
+    }
+
+    func testACoveredPhotoKeepsNoLocationCameraOrAuthor() throws {
+        // Found 2026-10-10: CIImage(contentsOf:) carries the source's
+        // properties through every filter and writeJPEGRepresentation wrote
+        // them back — GPS, make, model and serial number all survived a
+        // "redacted" copy.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("censor-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appendingPathComponent("photo.jpg")
+        try makeTaggedJPEG(at: input)
+        XCTAssertFalse(MetadataCheck.leaks(in: input).isEmpty, "the fixture must carry what the test looks for")
+
+        for ext in ["jpg", "heic", "png"] {
+            let output = dir.appendingPathComponent("photo-censored.\(ext)")
+            _ = try ImageCensor.censor(imageAt: input, target: .regions([Region(x: 0.3, y: 0.3, width: 0.4, height: 0.4)]),
+                                       style: CoverStyle(mode: .blur, intensity: 1, padding: 1),
+                                       to: output, dryRun: false)
+            XCTAssertEqual(MetadataCheck.leaks(in: output), [], "\(ext) kept metadata")
+        }
+    }
+
+    func testTheMetadataCheckNamesWhatItFinds() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("censor-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appendingPathComponent("photo.jpg")
+        try makeTaggedJPEG(at: input)
+        let found = Set(MetadataCheck.leaks(in: input))
+        XCTAssertTrue(found.isSuperset(of: ["GPS", "camera", "serial number", "author", "IPTC"]), "\(found)")
+    }
+
     func testDryRunRendersNothing() throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("censor-\(UUID().uuidString)")
