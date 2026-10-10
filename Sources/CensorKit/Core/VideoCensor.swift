@@ -119,11 +119,12 @@ public enum VideoCensor {
                       embedding: $0.embedding)
             }
 
-        case .text(let pattern):
+        case .text, .matching:
+            let matcher = target.textMatcher!
             let samples = try await sampleDetections(
                 asset: asset, track: videoTrack, stride: options.detectStride, context: context
             ) { image in
-                try Detector.textBoxes(in: image, pattern: pattern, quarterTurns: turns)
+                try Detector.textBoxes(in: image, matcher: matcher, quarterTurns: turns)
             }
             tracks = TrackMath.associate(samples).map {
                 Track(id: $0.id,
@@ -141,7 +142,7 @@ public enum VideoCensor {
             let covers: Int
             var detail = analysisDetail
             switch target {
-            case .faces, .text:
+            case .faces, .text, .matching:
                 covers = tracks.count
             case .regions(let regions):
                 covers = regions.count
@@ -168,7 +169,7 @@ public enum VideoCensor {
             return FileOutcome(input: url.path, status: .skipped, covers: 0,
                                detail: analysisDetail ?? "no faces detected")
         }
-        if case .text = target, tracks.isEmpty {
+        if target.textMatcher != nil, tracks.isEmpty {
             return FileOutcome(input: url.path, status: .skipped, covers: 0,
                                detail: "no matching text detected")
         }
@@ -428,7 +429,7 @@ public enum VideoCensor {
                     .init(shape: .rectangle, rect: CoverRenderer.coverRect(
                         x: $0.x, y: $0.y, width: $0.width, height: $0.height, in: extent))
                 }
-            case .text:
+            case .text, .matching:
                 return tracks.compactMap { track in
                     track.box(at: t).map {
                         .init(shape: .rectangle, rect: CoverRenderer.coverRect(

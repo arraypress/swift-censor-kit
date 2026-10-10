@@ -13,7 +13,9 @@
 import AVFoundation
 import CoreGraphics
 import CoreImage
+import CoreText
 import Foundation
+import Vision
 import XCTest
 @testable import CensorKit
 
@@ -385,6 +387,78 @@ final class CensorKitTests: XCTestCase {
                                          style: CoverStyle(mode: .blur, intensity: 1, padding: 1), to: output, dryRun: false)
         let after = await MetadataCheck.videoLeaks(in: output)
         XCTAssertEqual(after, [], "the censored clip still carries \(after)")
+    }
+
+    /// A one-second clip of a card held up to the camera: two lines of text
+    /// on every frame, one of them a card number.
+    private func makeTextVideo(at url: URL, lines: [String]) throws {
+        let width = 640, height = 360
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: width, AVVideoHeightKey: height])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height])
+        writer.add(input)
+        XCTAssertTrue(writer.startWriting())
+        writer.startSession(atSourceTime: .zero)
+        for frame in 0..<24 {
+            while !input.isReadyForMoreMediaData { usleep(2000) }
+            var buffer: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBuffer(nil, adaptor.pixelBufferPool!, &buffer)
+            CVPixelBufferLockBaseAddress(buffer!, [])
+            let context = CGContext(data: CVPixelBufferGetBaseAddress(buffer!), width: width, height: height,
+                                    bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(buffer!),
+                                    space: CGColorSpaceCreateDeviceRGB(),
+                                    bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)!
+            context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            for (index, line) in lines.enumerated() {
+                context.textPosition = CGPoint(x: 40, y: CGFloat(height - 120 - index * 70))
+                CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string: line, attributes: [
+                    NSAttributedString.Key(kCTFontAttributeName as String): CTFontCreateWithName("Menlo" as CFString, 34, nil)])), context)
+            }
+            CVPixelBufferUnlockBaseAddress(buffer!, [])
+            adaptor.append(buffer!, withPresentationTime: CMTime(value: CMTimeValue(frame), timescale: 24))
+        }
+        input.markAsFinished()
+        let done = XCTestExpectation(description: "written")
+        writer.finishWriting { done.fulfill() }
+        wait(for: [done], timeout: 30)
+    }
+
+    private func ocrFrame(of url: URL, at seconds: Double) async throws -> String {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let (image, _) = try await generator.image(at: CMTime(seconds: seconds, preferredTimescale: 600))
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+    }
+
+    func testACallersRuleCoversTextInVideoSolidly() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("censor-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appendingPathComponent("card.mov")
+        try makeTextVideo(at: input, lines: ["Membership ACME", "4111 1111 1111 1111"])
+        let before = try await ocrFrame(of: input, at: 0.5)
+        XCTAssertTrue(before.contains("4111"), "the fixture shows the number: \(before)")
+
+        // A rule only the caller knows: sixteen digits, here.
+        let rule = TextMatcher(summary: "card") { $0.filter(\.isNumber).count == 16 }
+        let output = dir.appendingPathComponent("card-covered.mov")
+        let outcome = try await VideoCensor.censor(videoAt: input, target: .matching(rule),
+                                                   style: CoverStyle(mode: .solid, intensity: 1, padding: 1.1),
+                                                   to: output, dryRun: false)
+        XCTAssertEqual(outcome.status, .covered)
+        for t in [0.1, 0.5, 0.9] {
+            let after = try await ocrFrame(of: output, at: t)
+            XCTAssertFalse(after.contains("4111"), "at \(t)s the number still reads: \(after)")
+            XCTAssertTrue(after.contains("ACME"), "the rest of the frame stays legible")
+        }
     }
 
     func testVideoRegionCoverAndContainerContract() async throws {

@@ -16,6 +16,9 @@ public struct CoverStyle: Sendable, Equatable {
     /// How the covered pixels are hidden.
     public enum Mode: String, Sendable, CaseIterable {
         case blur, pixelate, emoji
+        /// Opaque black: nothing of the covered pixels survives — what a
+        /// redaction needs, where blur and pixelation only obscure.
+        case solid
     }
 
     /// The hiding strategy.

@@ -162,6 +162,13 @@ enum CoverRenderer {
 
         case .pixelate:
             return pixelated(image, over: cover, face: face, intensity: style.intensity)
+
+        case .solid:
+            let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0)).cropped(to: image.extent)
+            return black.applyingFilter("CIBlendWithMask", parameters: [
+                "inputBackgroundImage": image,
+                "inputMaskImage": mask(for: cover, face: face, in: image.extent),
+            ]).cropped(to: image.extent)
         }
     }
 

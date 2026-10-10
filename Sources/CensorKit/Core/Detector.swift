@@ -73,6 +73,12 @@ enum Detector {
     /// Boxes of recognized lines whose text contains the pattern.
     static func textBoxes(in image: CGImage, pattern: String,
                           quarterTurns: Int = 0) throws -> [TrackMath.Detection] {
+        try textBoxes(in: image, matcher: .containing(pattern), quarterTurns: quarterTurns)
+    }
+
+    /// Boxes of recognized lines a matcher picks.
+    static func textBoxes(in image: CGImage, matcher: TextMatcher,
+                          quarterTurns: Int = 0) throws -> [TrackMath.Detection] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
@@ -82,7 +88,7 @@ enum Detector {
         var out: [TrackMath.Detection] = []
         for observation in request.results ?? [] {
             guard let candidate = observation.topCandidates(1).first,
-                  TextMatch.matches(candidate.string, pattern: pattern) else { continue }
+                  matcher.matches(candidate.string) else { continue }
             let box = observation.boundingBox
             let storage = OrientationMap.toStorage(
                 x: box.origin.x, y: 1 - box.origin.y - box.height,

@@ -71,8 +71,8 @@ public enum ImageCensor {
                 detail = only.map { "person \($0) of \(people)" } ?? "\(people) people, one mask"
             }
 
-        case .text(let pattern):
-            for detection in try Detector.textBoxes(in: cgImage, pattern: pattern) {
+        case .text, .matching:
+            for detection in try Detector.textBoxes(in: cgImage, matcher: target.textMatcher!) {
                 covers.append(.init(shape: .rectangle, rect: CoverRenderer.coverRect(
                     x: detection.x, y: detection.y,
                     width: detection.width, height: detection.height, in: image.extent)))

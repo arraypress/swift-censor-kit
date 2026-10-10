@@ -19,6 +19,22 @@ public enum CensorTargetSpec: Sendable {
     case person(only: Int?)
     /// Recognized text lines containing the pattern (case-insensitive).
     case text(pattern: String)
+    /// Recognized text lines a caller's rule picks — checksum-verified card
+    /// numbers, IBANs, emails, from RedactKit, without this kit depending
+    /// on it.
+    case matching(TextMatcher)
     /// Manually chosen areas.
     case regions([Region])
+}
+
+public extension CensorTargetSpec {
+
+    /// The rule for text targets, nil for every other kind.
+    var textMatcher: TextMatcher? {
+        switch self {
+        case .text(let pattern): return .containing(pattern)
+        case .matching(let matcher): return matcher
+        default: return nil
+        }
+    }
 }
