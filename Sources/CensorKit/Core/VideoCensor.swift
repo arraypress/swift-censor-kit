@@ -126,9 +126,14 @@ public enum VideoCensor {
             ) { image in
                 try Detector.textBoxes(in: image, matcher: matcher, quarterTurns: turns)
             }
+            // Text is held a stride BEFORE it was first read as well as
+            // after: OCR that misreads a line on one sample leaves the
+            // frames before the next sample uncovered, and a card number
+            // showed at 0.1 s of a clip it was covered in from 0.25 s on.
             tracks = TrackMath.associate(samples).map {
                 Track(id: $0.id,
-                      keyframes: TrackMath.extend($0.keyframes, hold: options.hold + options.detectStride))
+                      keyframes: TrackMath.leadIn(TrackMath.extend($0.keyframes, hold: options.hold + options.detectStride),
+                                                  by: options.detectStride))
             }
 
         case .regions, .person:

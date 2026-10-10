@@ -164,11 +164,18 @@ enum CoverRenderer {
             return pixelated(image, over: cover, face: face, intensity: style.intensity)
 
         case .solid:
-            let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0)).cropped(to: image.extent)
-            return black.applyingFilter("CIBlendWithMask", parameters: [
-                "inputBackgroundImage": image,
-                "inputMaskImage": mask(for: cover, face: face, in: image.extent),
-            ]).cropped(to: image.extent)
+            // A HARD edge, and taller than the line Vision reports. Through
+            // the feathered mask the other modes use, a covered email's
+            // first letter and the tops of its glyphs still showed, and OCR
+            // read part of the address back off the "redacted" frame.
+            let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0))
+            if case .mask(let provided) = cover.shape {
+                return black.cropped(to: image.extent).applyingFilter("CIBlendWithMask", parameters: [
+                    "inputBackgroundImage": image, "inputMaskImage": provided.cropped(to: image.extent),
+                ]).cropped(to: image.extent)
+            }
+            let grown = face.insetBy(dx: -max(4, face.height * 0.25), dy: -max(4, face.height * 0.35))
+            return black.cropped(to: grown.intersection(image.extent)).composited(over: image)
         }
     }
 

@@ -93,6 +93,13 @@ public enum TrackMath {
                         lastTime: detection.time,
                         embeddingCount: detection.embedding.isEmpty ? 0 : 1))
                     nextID += 1
+                    // A track started in this sample is taken for this sample.
+                    // It was not, until 2026-10-10: the second of two things
+                    // first seen together joined the first one's track, which
+                    // then slid between them, and the second went uncovered
+                    // until the next sample — a card number and an email in
+                    // the opening frames of a clip, or two faces.
+                    claimed.insert(live.count - 1)
                 }
             }
         }
@@ -129,6 +136,15 @@ public enum TrackMath {
     /// walker leaving frame left a stale pixel patch floating over the
     /// empty doorway), and the hold is cut short once the extrapolated
     /// box has fully left the frame — nothing there needs covering.
+    /// The same keyframes, with the first held `lead` seconds earlier
+    /// (never before zero) — cover from just before a thing was first seen.
+    public static func leadIn(_ keyframes: [TrackedBox], by lead: TimeInterval) -> [TrackedBox] {
+        guard lead > 0, let first = keyframes.first, first.time > 0 else { return keyframes }
+        var early = first
+        early.time = max(0, first.time - lead)
+        return [early] + keyframes
+    }
+
     public static func extend(_ keyframes: [TrackedBox], hold: TimeInterval) -> [TrackedBox] {
         guard hold > 0, let last = keyframes.last else { return keyframes }
 

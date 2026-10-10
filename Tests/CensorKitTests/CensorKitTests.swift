@@ -23,6 +23,19 @@ final class CensorKitTests: XCTestCase {
 
     // MARK: - Pure rules
 
+    func testTwoThingsFirstSeenTogetherGetTwoTracks() {
+        // Two lines of text (or two faces) in the first sample.
+        func box(_ t: Double, _ y: Double) -> TrackMath.Detection {
+            TrackMath.Detection(time: t, x: 0.06, y: y, width: 0.6, height: 0.08)
+        }
+        let tracks = TrackMath.associate([[box(0, 0.45), box(0, 0.64)], [box(0.25, 0.45), box(0.25, 0.64)]])
+        XCTAssertEqual(tracks.count, 2)
+        for track in tracks {
+            XCTAssertEqual(Set(track.keyframes.map(\.y)).count, 1, "a track stays on one line: \(track.keyframes)")
+            XCTAssertEqual(track.keyframes.map(\.time), [0, 0.25])
+        }
+    }
+
     func testRegionGrammar() throws {
         let plain = try RegionGrammar.parse("0.1,0.2,0.3,0.4")
         XCTAssertEqual(plain, Region(x: 0.1, y: 0.2, width: 0.3, height: 0.4))
@@ -443,12 +456,12 @@ final class CensorKitTests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let input = dir.appendingPathComponent("card.mov")
-        try makeTextVideo(at: input, lines: ["Membership ACME", "4111 1111 1111 1111"])
+        try makeTextVideo(at: input, lines: ["Membership ACME", "4111 1111 1111 1111", "anna@example.com"])
         let before = try await ocrFrame(of: input, at: 0.5)
         XCTAssertTrue(before.contains("4111"), "the fixture shows the number: \(before)")
 
         // A rule only the caller knows: sixteen digits, here.
-        let rule = TextMatcher(summary: "card") { $0.filter(\.isNumber).count == 16 }
+        let rule = TextMatcher(summary: "card, email") { $0.filter(\.isNumber).count == 16 || $0.contains("@") }
         let output = dir.appendingPathComponent("card-covered.mov")
         let outcome = try await VideoCensor.censor(videoAt: input, target: .matching(rule),
                                                    style: CoverStyle(mode: .solid, intensity: 1, padding: 1.1),
@@ -457,7 +470,11 @@ final class CensorKitTests: XCTestCase {
         for t in [0.1, 0.5, 0.9] {
             let after = try await ocrFrame(of: output, at: t)
             XCTAssertFalse(after.contains("4111"), "at \(t)s the number still reads: \(after)")
-            XCTAssertTrue(after.contains("ACME"), "the rest of the frame stays legible")
+            // Found 2026-10-10: through a feathered edge the email's first
+            // letter and glyph tops showed and OCR read part of it back.
+            XCTAssertFalse(after.contains(".com") || after.contains("anna"), "at \(t)s the email still reads: \(after)")
+            // "ACME" came back in Cyrillic once; the word beside it is steadier.
+            XCTAssertTrue(after.contains("Membership"), "the rest of the frame stays legible")
         }
     }
 
