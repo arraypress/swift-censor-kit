@@ -12,9 +12,19 @@ let package = Package(
     products: [
         .library(name: "CensorKit", targets: ["CensorKit"]),
     ],
+    dependencies: [
+        // The writer settings and the deadlock-free writer feeding — one
+        // copy, shared with `vid`, rather than a fork of each here.
+        .package(url: "https://github.com/arraypress/swift-video-forge.git", from: "0.5.0"),
+    ],
     targets: [
-        .target(name: "CensorKit"),
-        .testTarget(name: "CensorKitTests", dependencies: ["CensorKit"]),
+        .target(name: "CensorKit", dependencies: [
+            .product(name: "VideoForge", package: "swift-video-forge"),
+        ]),
+        .testTarget(name: "CensorKitTests", dependencies: [
+            "CensorKit",
+            .product(name: "VideoForge", package: "swift-video-forge"),
+        ]),
     ]
 )
 

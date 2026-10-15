@@ -18,6 +18,7 @@ import Foundation
 import Vision
 import XCTest
 @testable import CensorKit
+import VideoForge
 
 final class CensorKitTests: XCTestCase {
 
@@ -726,50 +727,36 @@ final class CensorKitTests: XCTestCase {
 
     // MARK: - Quality parity
 
+    /// The settings themselves are VideoForge's (and tested there); the
+    /// codec rule is censor-kit's: HEVC stays HEVC, 10-bit is ALWAYS HEVC
+    /// Main 10, anything else H.264 — and frames are worked on in RGB.
     func testWriterSettingsDerivation() {
-        // The real iPhone HDR story: HEVC 10-bit HLG at 31 Mb/s.
-        let hdr = WriterSettings.derive(
-            codecSubtype: "hvc1", width: 3840, height: 2160,
-            estimatedDataRate: 31_000_000, nominalFrameRate: 24,
+        let hdr = VideoCensor.derivedSettings(from: VideoSourceFormat(
+            codec: "hvc1", width: 3840, height: 2160, dataRate: 31_000_000, frameRate: 24,
             bitsPerComponent: 10, colorPrimaries: "ITU_R_2020",
-            transferFunction: "ITU_R_2100_HLG", yCbCrMatrix: "ITU_R_2020")
-        XCTAssertEqual(hdr.codec, "hvc1")
+            transferFunction: "ITU_R_2100_HLG", yCbCrMatrix: "ITU_R_2020"))
+        XCTAssertEqual(hdr.codec, .hevc)
         XCTAssertEqual(hdr.profileLevel, "HEVC_Main10_AutoLevel")
         XCTAssertEqual(hdr.averageBitRate, 31_000_000, "never below the source's rate")
-        XCTAssertEqual(hdr.expectedFrameRate, 24)
         XCTAssertEqual(hdr.transferFunction, "ITU_R_2100_HLG")
         XCTAssertEqual(hdr.pixelFormat, kCVPixelFormatType_ARGB2101010LEPacked)
 
-        // Plain 8-bit H.264 with no rate estimate: the resolution floor.
-        let sdr = WriterSettings.derive(
-            codecSubtype: "avc1", width: 1920, height: 1080,
-            estimatedDataRate: 0, nominalFrameRate: 30,
-            bitsPerComponent: 8, colorPrimaries: nil,
-            transferFunction: nil, yCbCrMatrix: nil)
-        XCTAssertEqual(sdr.codec, "avc1")
-        XCTAssertNil(sdr.profileLevel)
+        let sdr = VideoCensor.derivedSettings(from: VideoSourceFormat(
+            codec: "avc1", width: 1920, height: 1080, frameRate: 30, bitsPerComponent: 8))
+        XCTAssertEqual(sdr.codec, .h264)
         XCTAssertEqual(sdr.averageBitRate, Int(1920.0 * 1080 * 30 * 0.05))
-        XCTAssertFalse(sdr.hasColorProperties)
         XCTAssertEqual(sdr.pixelFormat, kCVPixelFormatType_32BGRA)
 
-        // A partial color set is dropped whole — the writer rejects partial
-        // dictionaries, and guessing the missing member invents color.
-        let partial = WriterSettings.derive(
-            codecSubtype: "hvc1", width: 100, height: 100,
-            estimatedDataRate: 5_000_000, nominalFrameRate: 30,
-            bitsPerComponent: 8, colorPrimaries: "ITU_R_709_2",
-            transferFunction: nil, yCbCrMatrix: "ITU_R_709_2")
-        XCTAssertFalse(partial.hasColorProperties)
-        XCTAssertNil(partial.colorPrimaries)
+        let hevc8 = VideoCensor.derivedSettings(from: VideoSourceFormat(codec: "hvc1", width: 100, height: 100))
+        XCTAssertEqual(hevc8.codec, .hevc)
+        XCTAssertNil(hevc8.profileLevel)
 
-        // Any 10-bit source is HEVC Main10, whatever it arrived as: the
+        // Any 10-bit source is HEVC Main 10, whatever it arrived as: the
         // H.264 path is 8-bit and would truncate.
-        let prores = WriterSettings.derive(
-            codecSubtype: "ap4h", width: 1920, height: 1080,
-            estimatedDataRate: 80_000_000, nominalFrameRate: 25,
-            bitsPerComponent: 10, colorPrimaries: nil,
-            transferFunction: nil, yCbCrMatrix: nil)
-        XCTAssertEqual(prores.codec, "hvc1")
+        let prores = VideoCensor.derivedSettings(from: VideoSourceFormat(
+            codec: "ap4h", width: 1920, height: 1080, dataRate: 80_000_000, frameRate: 25,
+            bitsPerComponent: 10))
+        XCTAssertEqual(prores.codec, .hevc)
         XCTAssertEqual(prores.profileLevel, "HEVC_Main10_AutoLevel")
     }
 

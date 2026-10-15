@@ -8,15 +8,16 @@
 //  TrackMath turn sampled detections into steady tracks; the render pass
 //  decodes again, covers each frame, and writes.
 //
-//  Two hard-won rules shape the writing side. QUALITY PARITY: the writer
-//  is configured FROM the source (codec, bitrate, 10-bit depth, color
-//  tags, frame rate — see WriterSettings), because default settings
+//  Two hard-won rules shape the writing side, and both now live in
+//  swift-video-forge, which `vid` shares. QUALITY PARITY: the writer is
+//  configured FROM the source (codec, bitrate, 10-bit depth, color tags,
+//  frame rate — VideoForge's `WriterSettings`), because default settings
 //  turned iPhone HDR into starved 8-bit SDR. INTERLEAVED FEEDING: every
-//  input is pumped via requestMediaDataWhenReady; the writer THROTTLES
-//  an input that runs ahead of the others, so draining audio to the end
-//  before the first video frame deadlocks on long clips — the 4K bug
-//  was nine minutes of spinning on an audio input the writer had
-//  politely paused. Audio and timed-metadata tracks pass through
+//  input is fed only when the writer asks (VideoForge's `WriterPump`);
+//  the writer THROTTLES an input that runs ahead of the others, so
+//  draining audio to the end before the first video frame deadlocks on
+//  long clips — the 4K bug was nine minutes of spinning on an audio input
+//  the writer had politely paused. Audio and timed-metadata tracks pass through
 //  untouched (re-encoding rejects float32 LPCM; iPhone clips carry mebx
 //  metadata worth keeping) — all but timed tracks that identify, which
 //  are dropped, and every output is re-read by MetadataCheck.
@@ -26,6 +27,7 @@ import AVFoundation
 import CoreImage
 import Foundation
 import ImageIO
+import VideoForge
 
 public enum VideoCensor {
 
@@ -183,12 +185,7 @@ public enum VideoCensor {
         }
 
         // Derive the writer's story from the source's (quality parity).
-        let descriptions = try await videoTrack.load(.formatDescriptions)
-        let fps = try await videoTrack.load(.nominalFrameRate)
-        let dataRate = try await videoTrack.load(.estimatedDataRate)
-        let settings = derivedSettings(
-            from: descriptions.first, size: naturalSize,
-            fps: Double(fps), dataRate: Double(dataRate))
+        let settings = derivedSettings(from: try await VideoSourceFormat.load(from: videoTrack))
 
         // Reader: video in the pipeline format, everything else passthrough.
         let reader = try AVAssetReader(asset: asset)
@@ -201,28 +198,10 @@ public enum VideoCensor {
         var passthroughPairs: [(output: AVAssetReaderTrackOutput, input: AVAssetWriterInput)] = []
         let writer = try makeWriter(at: output)
 
-        // Encoders refuse odd dimensions (fleet trap) — floor to even.
-        let width = Int(naturalSize.width / 2) * 2
-        let height = Int(naturalSize.height / 2) * 2
-        var videoSettings: [String: Any] = [
-            AVVideoCodecKey: settings.codec == "hvc1" ? AVVideoCodecType.hevc : AVVideoCodecType.h264,
-            AVVideoWidthKey: width,
-            AVVideoHeightKey: height,
-        ]
-        var compression: [String: Any] = [AVVideoAverageBitRateKey: settings.averageBitRate]
-        if let profile = settings.profileLevel {
-            compression[AVVideoProfileLevelKey] = profile
-        }
-        if let expected = settings.expectedFrameRate {
-            compression[AVVideoExpectedSourceFrameRateKey] = expected
-        }
-        videoSettings[AVVideoCompressionPropertiesKey] = compression
-        if settings.hasColorProperties {
-            videoSettings[AVVideoColorPropertiesKey] = [
-                AVVideoColorPrimariesKey: settings.colorPrimaries!,
-                AVVideoTransferFunctionKey: settings.transferFunction!,
-                AVVideoYCbCrMatrixKey: settings.yCbCrMatrix!,
-            ]
+        // Encoders refuse odd dimensions (fleet trap): the settings are even.
+        let videoSettings = settings.videoOutputSettings
+        guard writer.canApply(outputSettings: videoSettings, forMediaType: .video) else {
+            throw CensorError.processing("the writer refused the derived video settings")
         }
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoInput.transform = transform
@@ -231,12 +210,7 @@ public enum VideoCensor {
         }
         writer.add(videoInput)
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
-            assetWriterInput: videoInput,
-            sourcePixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: settings.pixelFormat,
-                kCVPixelBufferWidthKey as String: width,
-                kCVPixelBufferHeightKey as String: height,
-            ])
+            assetWriterInput: videoInput, sourcePixelBufferAttributes: settings.pixelBufferAttributes)
 
         // Audio and timed metadata: passthrough, format hints from the source
         // — except a timed track that says where the camera was or where the
@@ -258,14 +232,6 @@ public enum VideoCensor {
             passthroughPairs.append((trackOutput, input))
         }
 
-        guard reader.startReading() else {
-            throw CensorError.processing("could not read \(url.lastPathComponent): \(reader.error?.localizedDescription ?? "unknown")")
-        }
-        guard writer.startWriting() else {
-            throw CensorError.io("could not write \(output.lastPathComponent): \(writer.error?.localizedDescription ?? "unknown")")
-        }
-        writer.startSession(atSourceTime: .zero)
-
         // Interleaved pumping: every input is fed only when the writer asks.
         // The emoji must be upright in DISPLAY space: pre-rotate it by the
         // inverse of the display rotation.
@@ -279,7 +245,7 @@ public enum VideoCensor {
         let plan = FramePlan(target: target, tracks: tracks, isPerson: isPerson,
                              extent: extent, style: style, emojiImage: emoji)
 
-        var feeds: [Feed] = [Feed(input: videoInput, label: "video") {
+        var feeds: [WriterFeed] = [WriterFeed(input: videoInput) {
             guard let sample = videoOutput.copyNextSampleBuffer() else { return false }
             guard let buffer = CMSampleBufferGetImageBuffer(sample) else { return true }
             let pts = CMSampleBufferGetPresentationTimeStamp(sample)
@@ -309,18 +275,12 @@ public enum VideoCensor {
             return true
         }]
         for (trackOutput, input) in passthroughPairs {
-            feeds.append(Feed(input: input, label: "passthrough") {
-                guard let sample = trackOutput.copyNextSampleBuffer() else { return false }
-                input.append(sample)
-                return true
-            })
+            feeds.append(.copying(from: trackOutput, to: input))
         }
-        try await pump(feeds)
-        reader.cancelReading()
-
-        await writer.finishWriting()
-        guard writer.status == .completed else {
-            throw CensorError.io("finishing \(output.lastPathComponent) failed: \(writer.error?.localizedDescription ?? "unknown")")
+        do {
+            try await WriterPump.run(WriterJob(reader: reader, writer: writer, feeds: feeds))
+        } catch let error as VideoForgeError {
+            throw CensorError.io("writing \(output.lastPathComponent) failed: \(error.localizedDescription)")
         }
         // Checked, not assumed: a censored clip for sharing that still says
         // where it was shot is removed and refused.
@@ -340,66 +300,9 @@ public enum VideoCensor {
             gaps: gapsOrNil)
     }
 
-    // MARK: - The feeding machinery
-
-    /// One writer input and the step that feeds it its next sample.
-    /// State is confined to the input's own serial queue.
-    private final class Feed: @unchecked Sendable {
-        let input: AVAssetWriterInput
-        let queue: DispatchQueue
-        let step: () throws -> Bool
-        var finished = false
-
-        init(input: AVAssetWriterInput, label: String, step: @escaping () throws -> Bool) {
-            self.input = input
-            self.queue = DispatchQueue(label: "censorkit.feed.\(label)")
-            self.step = step
-        }
-    }
-
     private final class Counters: @unchecked Sendable {
         var frames = 0
         var covered = 0
-    }
-
-    private final class ErrorBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var error: Error?
-        func set(_ e: Error) { lock.lock(); if error == nil { error = e }; lock.unlock() }
-        func get() -> Error? { lock.lock(); defer { lock.unlock() }; return error }
-    }
-
-    /// Runs every feed under `requestMediaDataWhenReady` until all sources
-    /// drain, surfacing the first error. The writer throttles inputs that
-    /// run ahead; feeding on demand is what keeps long clips deadlock-free.
-    private static func pump(_ feeds: [Feed]) async throws {
-        let errors = ErrorBox()
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let group = DispatchGroup()
-            for feed in feeds {
-                group.enter()
-                feed.input.requestMediaDataWhenReady(on: feed.queue) {
-                    guard !feed.finished else { return }
-                    do {
-                        while feed.input.isReadyForMoreMediaData {
-                            if try !feed.step() {
-                                feed.finished = true
-                                feed.input.markAsFinished()
-                                group.leave()
-                                return
-                            }
-                        }
-                    } catch {
-                        errors.set(error)
-                        feed.finished = true
-                        feed.input.markAsFinished()
-                        group.leave()
-                    }
-                }
-            }
-            group.notify(queue: DispatchQueue.global()) { continuation.resume() }
-        }
-        if let error = errors.get() { throw error }
     }
 
     /// Everything the per-frame cover decision needs, queue-confined.
@@ -477,32 +380,18 @@ public enum VideoCensor {
         return try AVAssetWriter(outputURL: output, fileType: .mov)
     }
 
-    /// The source's format story as plain values → WriterSettings.
-    static func derivedSettings(
-        from description: CMFormatDescription?, size: CGSize,
-        fps: Double, dataRate: Double
-    ) -> WriterSettings {
-        var subtype = "avc1"
-        var bits: Int?
-        var primaries: String?
-        var transfer: String?
-        var matrix: String?
-        if let description {
-            let sub = CMFormatDescriptionGetMediaSubType(description)
-            subtype = String(format: "%c%c%c%c", (sub >> 24) & 255, (sub >> 16) & 255,
-                             (sub >> 8) & 255, sub & 255)
-            if let ext = CMFormatDescriptionGetExtensions(description) as? [String: Any] {
-                bits = ext["BitsPerComponent"] as? Int
-                primaries = ext["CVImageBufferColorPrimaries"] as? String
-                transfer = ext["CVImageBufferTransferFunction"] as? String
-                matrix = ext["CVImageBufferYCbCrMatrix"] as? String
-            }
-        }
-        return WriterSettings.derive(
-            codecSubtype: subtype, width: Int(size.width), height: Int(size.height),
-            estimatedDataRate: dataRate, nominalFrameRate: fps,
-            bitsPerComponent: bits, colorPrimaries: primaries,
-            transferFunction: transfer, yCbCrMatrix: matrix)
+    /// The source's format story → the writer's settings.
+    ///
+    /// The codec rule is censor-kit's own: HEVC in → HEVC out; anything
+    /// else re-encodes as H.264 — except a 10-bit source, which is ALWAYS
+    /// HEVC Main 10 (H.264 hardware paths are 8-bit; writing one would
+    /// truncate the source's depth). Frames are worked on in RGB, for
+    /// Vision and the cover drawing: BGRA, or 10-bit ARGB when deep.
+    static func derivedSettings(from source: VideoSourceFormat) -> WriterSettings {
+        let deep = (source.bitsPerComponent ?? 8) >= 10
+        let hevcIn = source.codec == "hvc1" || source.codec == "hev1"
+        return WriterSettings.derive(from: source, codec: hevcIn || deep ? .hevc : .h264,
+                                     processesInRGB: true)
     }
 
     /// Decodes once, running `detect` on frames sampled every `stride`

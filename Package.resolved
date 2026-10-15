@@ -1,0 +1,42 @@
+{
+  "originHash" : "b538fd7471e74093a67ce2720023908b04b5efa6a7e25863bba3e706073722a4",
+  "pins" : [
+    {
+      "identity" : "swift-image-forge",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/arraypress/swift-image-forge.git",
+      "state" : {
+        "revision" : "3b63baf674417c39e55fe0bc60efe9d2342b0bc2",
+        "version" : "0.7.1"
+      }
+    },
+    {
+      "identity" : "swift-subtitle-kit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/arraypress/swift-subtitle-kit.git",
+      "state" : {
+        "revision" : "68a355c9baa3ca36ee55e028dbd4bd3106ecaa18",
+        "version" : "0.1.0"
+      }
+    },
+    {
+      "identity" : "swift-video-forge",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/arraypress/swift-video-forge.git",
+      "state" : {
+        "revision" : "40638287434cd8526b3b94f526ac2f25d694e4aa",
+        "version" : "0.5.0"
+      }
+    },
+    {
+      "identity" : "swift-video-grade",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/arraypress/swift-video-grade.git",
+      "state" : {
+        "revision" : "9275893d05b60348d60bddd2d99787aa4a778870",
+        "version" : "0.2.2"
+      }
+    }
+  ],
+  "version" : 3
+}

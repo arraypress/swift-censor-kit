@@ -37,7 +37,7 @@ let outcome = try await VideoCensor.censor(
 ## The contract
 
 - Output is always a new file; the engine never opens an original for writing. Video lands in `.mov` (the container the audio passthrough guarantees), stills keep their format and color space; orientation is baked in on load.
-- **Quality parity**: the writer is configured from the source — same codec (HEVC in, HEVC out), bitrate never below the source's estimate, 10-bit stays 10-bit (HEVC Main10), color tags copied whole (iPhone HDR stays BT.2020/HLG), frame rate and rotation preserved, and audio plus timed-metadata tracks pass through untouched. Verified on a real iPhone 4K HDR clip: the censored copy's format story matches the source field for field. The one honest exception: Dolby Vision dynamic metadata does not survive any re-encode — output remains correct HLG/HDR10-style HDR, without the per-scene Dolby layer.
+- **Quality parity**: the writer is configured from the source — same codec (HEVC in, HEVC out), bitrate never below the source's estimate, 10-bit stays 10-bit (HEVC Main10), color tags copied whole (iPhone HDR stays BT.2020/HLG), frame rate and rotation preserved, and audio plus timed-metadata tracks pass through untouched. The settings and the deadlock-free writer feeding are [swift-video-forge](https://github.com/arraypress/swift-video-forge)'s `WriterSettings` and `WriterPump` (moved there in 2.4.0, so `vid` and this library write the same way); the codec rule — HEVC stays HEVC, 10-bit is always HEVC Main 10, anything else H.264 — and the RGB frame formats Vision needs are this library's. Measured after the move: `redact region` on 8-bit H.264 + AAC, 10-bit HLG HEVC and a noise clip gave decoded frames and audio identical to 2.3.1's. Verified on a real iPhone 4K HDR clip: the censored copy's format story matches the source field for field. The one honest exception: Dolby Vision dynamic metadata does not survive any re-encode — output remains correct HLG/HDR10-style HDR, without the per-scene Dolby layer.
 - `SCAGate` wraps Apple's SensitiveContentAnalysis (images and, on this SDK, video files). It judges whole files only and answers only where its policy allows; everything else reports that honestly rather than guessing.
 - **What this cannot do**: no Apple API localizes body parts, so there is no automatic NSFW-region covering — the honest workflow is SCA's whole-file flag plus person/region covers.
 
@@ -45,7 +45,7 @@ let outcome = try await VideoCensor.censor(
 
 - macOS 26+, Apple silicon
 - Swift 6.2
-- Frameworks: Vision, CoreImage, AVFoundation, ImageIO, SensitiveContentAnalysis, Accelerate — nothing third-party
+- Frameworks: Vision, CoreImage, AVFoundation, ImageIO, SensitiveContentAnalysis, Accelerate; fleet packages only — swift-video-forge, and through it swift-image-forge, swift-video-grade and swift-subtitle-kit — nothing third-party
 
 ## License
 
