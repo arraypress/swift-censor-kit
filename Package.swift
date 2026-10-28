@@ -15,11 +15,18 @@ let package = Package(
     dependencies: [
         // The writer settings and the deadlock-free writer feeding — one
         // copy, shared with `vid`, rather than a fork of each here.
-        .package(url: "https://github.com/arraypress/swift-video-forge.git", from: "0.5.0"),
+        .package(url: "https://github.com/arraypress/swift-video-forge.git", from: "0.9.1"),
+        // The contact sheet the people list and the preview are drawn on.
+        .package(url: "https://github.com/arraypress/swift-image-forge.git", from: "0.8.0"),
+        // Apple's face grouping prints its progress to standard output,
+        // where a command-line tool writes JSON.
+        .package(url: "https://github.com/arraypress/swift-stdout-silencer.git", from: "0.2.0"),
     ],
     targets: [
         .target(name: "CensorKit", dependencies: [
             .product(name: "VideoForge", package: "swift-video-forge"),
+            .product(name: "ImageForge", package: "swift-image-forge"),
+            .product(name: "StdoutSilencer", package: "swift-stdout-silencer"),
         ]),
         .testTarget(name: "CensorKitTests", dependencies: [
             "CensorKit",

@@ -19,6 +19,10 @@ public struct FileOutcome: Sendable, Codable, Equatable {
         case failed
         /// Dry run: what a real run would have covered.
         case wouldCover = "would-cover"
+        /// A sheet of covered stills was written instead of the video.
+        case previewed
+        /// A sheet of the people found was written, numbered for selection.
+        case outlined
     }
 
     public var input: String
@@ -31,14 +35,18 @@ public struct FileOutcome: Sendable, Codable, Equatable {
     /// Video only: windows where a tracked subject may be present but
     /// uncovered — the seconds a human should review.
     public var gaps: [CoverageGap]?
+    /// Video faces, when they were numbered: who was found, and when.
+    public var people: [VideoPerson]?
 
     public init(input: String, output: String? = nil, status: Status,
-                covers: Int = 0, detail: String? = nil, gaps: [CoverageGap]? = nil) {
+                covers: Int = 0, detail: String? = nil, gaps: [CoverageGap]? = nil,
+                people: [VideoPerson]? = nil) {
         self.input = input
         self.output = output
         self.status = status
         self.covers = covers
         self.detail = detail
         self.gaps = gaps
+        self.people = people
     }
 }

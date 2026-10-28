@@ -38,72 +38,86 @@ public enum TrackMath {
         }
     }
 
-    /// Greedy nearest-center association of sampled detections into tracks.
+    /// Nearest-center association of sampled detections into tracks.
     ///
-    /// Samples must arrive in ascending time order. A detection continues
-    /// the nearest live track whose last center is within ``maxJump``;
-    /// otherwise it starts a new track. Track embeddings are the running
-    /// mean of their detections', so identity smooths the way boxes do.
-    public static func associate(_ samples: [[Detection]]) -> [Track] {
+    /// Samples must arrive in ascending time order. Within a sample, the
+    /// closest detection-and-track pair is joined first, then the next
+    /// closest, each detection and each track at most once — so two faces
+    /// side by side keep their own tracks. Until 2026-10-28 each detection
+    /// took its nearest track in the order Vision listed them, and two
+    /// people shoulder to shoulder swapped tracks sample after sample. A
+    /// pair is only joined within ``maxJump``; a detection left over
+    /// starts a new track. Track embeddings are the running mean of their
+    /// detections', so identity smooths the way boxes do.
+    ///
+    /// No track continues across a time in `cuts` — where the shot
+    /// changes. Without that, the next shot's face in the same part of the
+    /// frame continued the last shot's track: its embedding averaged two
+    /// people, so a reference photo matched neither, and its cover slid
+    /// between the two places across any gap.
+    public static func associate(_ samples: [[Detection]], cuts: [TimeInterval] = []) -> [Track] {
         struct Live {
             var track: Track
-            var lastTime: TimeInterval
             var embeddingCount: Int
         }
         var live: [Live] = []
         var nextID = 0
 
         for sample in samples {
-            var claimed = Set<Int>()
-            for detection in sample {
-                var bestIndex: Int?
-                var bestDistance = Double.greatestFiniteMagnitude
-                for (index, candidate) in live.enumerated() where !claimed.contains(index) {
-                    guard let last = candidate.track.keyframes.last else { continue }
+            var pairs: [(detection: Int, live: Int, distance: Double)] = []
+            for (d, detection) in sample.enumerated() {
+                for (index, candidate) in live.enumerated() {
+                    guard let last = candidate.track.keyframes.last,
+                          !separated(last.time, detection.time, by: cuts) else { continue }
                     let dx = (last.x + last.width / 2) - (detection.x + detection.width / 2)
                     let dy = (last.y + last.height / 2) - (detection.y + detection.height / 2)
                     let distance = (dx * dx + dy * dy).squareRoot()
-                    if distance < bestDistance {
-                        bestDistance = distance
-                        bestIndex = index
-                    }
+                    if distance <= maxJump { pairs.append((d, index, distance)) }
                 }
+            }
+            pairs.sort { ($0.distance, $0.detection, $0.live) < ($1.distance, $1.detection, $1.live) }
+            var trackOf: [Int: Int] = [:]
+            var taken = Set<Int>()
+            for pair in pairs where trackOf[pair.detection] == nil && !taken.contains(pair.live) {
+                trackOf[pair.detection] = pair.live
+                taken.insert(pair.live)
+            }
+
+            // A track started in this sample is taken for this sample. It
+            // was not, until 2026-10-10: the second of two things first seen
+            // together joined the first one's track, which then slid between
+            // them, and the second went uncovered until the next sample.
+            for (d, detection) in sample.enumerated() {
                 let box = TrackedBox(time: detection.time, x: detection.x, y: detection.y,
                                      width: detection.width, height: detection.height)
-                if let index = bestIndex, bestDistance <= maxJump {
-                    claimed.insert(index)
-                    live[index].track.keyframes.append(box)
-                    live[index].lastTime = detection.time
-                    if !detection.embedding.isEmpty {
-                        let n = live[index].embeddingCount
-                        if n == 0 || live[index].track.embedding.count != detection.embedding.count {
-                            live[index].track.embedding = detection.embedding
-                            live[index].embeddingCount = 1
-                        } else {
-                            for i in detection.embedding.indices {
-                                live[index].track.embedding[i] =
-                                    (live[index].track.embedding[i] * Float(n) + detection.embedding[i]) / Float(n + 1)
-                            }
-                            live[index].embeddingCount = n + 1
-                        }
-                    }
-                } else {
-                    live.append(Live(
-                        track: Track(id: nextID, keyframes: [box], embedding: detection.embedding),
-                        lastTime: detection.time,
-                        embeddingCount: detection.embedding.isEmpty ? 0 : 1))
+                guard let index = trackOf[d] else {
+                    live.append(Live(track: Track(id: nextID, keyframes: [box], embedding: detection.embedding),
+                                     embeddingCount: detection.embedding.isEmpty ? 0 : 1))
                     nextID += 1
-                    // A track started in this sample is taken for this sample.
-                    // It was not, until 2026-10-10: the second of two things
-                    // first seen together joined the first one's track, which
-                    // then slid between them, and the second went uncovered
-                    // until the next sample — a card number and an email in
-                    // the opening frames of a clip, or two faces.
-                    claimed.insert(live.count - 1)
+                    continue
+                }
+                live[index].track.keyframes.append(box)
+                if !detection.embedding.isEmpty {
+                    let n = live[index].embeddingCount
+                    if n == 0 || live[index].track.embedding.count != detection.embedding.count {
+                        live[index].track.embedding = detection.embedding
+                        live[index].embeddingCount = 1
+                    } else {
+                        for i in detection.embedding.indices {
+                            live[index].track.embedding[i] =
+                                (live[index].track.embedding[i] * Float(n) + detection.embedding[i]) / Float(n + 1)
+                        }
+                        live[index].embeddingCount = n + 1
+                    }
                 }
             }
         }
         return live.map(\.track)
+    }
+
+    /// Whether a cut falls after `earlier` and at or before `later`.
+    static func separated(_ earlier: TimeInterval, _ later: TimeInterval, by cuts: [TimeInterval]) -> Bool {
+        cuts.contains { $0 > earlier && $0 <= later }
     }
 
     /// Exponential smoothing over a track's boxes. `alpha` is the weight of
@@ -123,9 +137,27 @@ public enum TrackMath {
         return out
     }
 
+    /// How long before a cut a held cover ends — under one frame at 120 fps.
+    static let cutMargin = 0.005
+
     /// Below this speed (frame fractions per second) a held cover freezes
     /// in place; above it, the hold follows the motion.
     public static let exitSpeedThreshold = 0.05
+
+    /// The same keyframes, with the first held `lead` seconds earlier
+    /// (never before zero) — cover from just before a thing was first seen.
+    ///
+    /// A lead never reaches back past a cut in `cuts`: before it, the
+    /// shot was another picture.
+    public static func leadIn(_ keyframes: [TrackedBox], by lead: TimeInterval,
+                              cuts: [TimeInterval] = []) -> [TrackedBox] {
+        guard lead > 0, let first = keyframes.first, first.time > 0 else { return keyframes }
+        let floor = cuts.filter { $0 <= first.time }.max() ?? 0
+        guard first.time > floor else { return keyframes }
+        var early = first
+        early.time = max(floor, first.time - lead)
+        return [early] + keyframes
+    }
 
     /// Extends a track `hold` seconds past its last sighting, so a cover
     /// outlives a missed detection instead of flickering off.
@@ -136,17 +168,15 @@ public enum TrackMath {
     /// walker leaving frame left a stale pixel patch floating over the
     /// empty doorway), and the hold is cut short once the extrapolated
     /// box has fully left the frame — nothing there needs covering.
-    /// The same keyframes, with the first held `lead` seconds earlier
-    /// (never before zero) — cover from just before a thing was first seen.
-    public static func leadIn(_ keyframes: [TrackedBox], by lead: TimeInterval) -> [TrackedBox] {
-        guard lead > 0, let first = keyframes.first, first.time > 0 else { return keyframes }
-        var early = first
-        early.time = max(0, first.time - lead)
-        return [early] + keyframes
-    }
-
-    public static func extend(_ keyframes: [TrackedBox], hold: TimeInterval) -> [TrackedBox] {
-        guard hold > 0, let last = keyframes.last else { return keyframes }
+    ///
+    /// A hold also ends at the next cut in `cuts`: after it the shot is
+    /// another picture, and a cover left where the face was is a smudge
+    /// on an empty wall.
+    public static func extend(_ keyframes: [TrackedBox], hold: TimeInterval,
+                              cuts: [TimeInterval] = []) -> [TrackedBox] {
+        guard let last = keyframes.last else { return keyframes }
+        let hold = min(hold, (cuts.filter { $0 > last.time }.min() ?? .infinity) - last.time - cutMargin)
+        guard hold > 0 else { return keyframes }
 
         func frozen() -> [TrackedBox] {
             var held = last

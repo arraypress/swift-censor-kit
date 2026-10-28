@@ -41,13 +41,16 @@ public enum VideoCensor {
         /// Adds the tiled detection pass to every sample — small
         /// background faces at a real cost; measured in the README.
         public var thorough: Bool
+        /// Stills on a preview sheet.
+        public var previewFrames: Int
 
         public init(detectStride: TimeInterval = 0.25, hold: TimeInterval = 0.75,
-                    smoothing: Double = 0.5, thorough: Bool = false) {
+                    smoothing: Double = 0.5, thorough: Bool = false, previewFrames: Int = 16) {
             self.detectStride = detectStride
             self.hold = hold
             self.smoothing = smoothing
             self.thorough = thorough
+            self.previewFrames = previewFrames
         }
     }
 
@@ -57,93 +60,13 @@ public enum VideoCensor {
         to output: URL, dryRun: Bool, options: Options = Options(),
         progress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> FileOutcome {
-        let asset = AVURLAsset(url: url)
-        guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
-            throw CensorError.io("\(url.lastPathComponent) has no video track")
-        }
-        let (naturalSize, transform, duration) = try await (
-            videoTrack.load(.naturalSize), videoTrack.load(.preferredTransform),
-            asset.load(.duration))
-        let extent = CGRect(origin: .zero, size: naturalSize)
-        let turns = OrientationMap.quarterTurns(of: transform)
-        let context = CIContext()
-
-        // Analysis (faces and text; regions need none, person is per-frame).
-        var tracks: [Track] = []
-        var analysisDetail: String?
-        switch target {
-        case .faces(let selection):
-            if selection.usesNumbers {
-                throw CensorError.usage(
-                    "numbered face selection works on images — on video, select with reference photos")
-            }
-            let wantIdentity = selection.wantsIdentity
-            let samples = try await sampleDetections(
-                asset: asset, track: videoTrack, stride: options.detectStride, context: context
-            ) { image in
-                let found = options.thorough
-                    ? try Detector.facesThorough(in: image, withEmbeddings: wantIdentity,
-                                                 quarterTurns: turns, force: true)
-                    : try Detector.faces(in: image, withEmbeddings: wantIdentity,
-                                         quarterTurns: turns)
-                // Size the cover at sample time and TRACK the head boxes:
-                // the render pass then draws tracks verbatim, and the
-                // video margin leads a moving head instead of trailing it.
-                return found.map { detection in
-                    var head = detection
-                    let sized = Detector.adaptiveHeadBox(
-                        in: image, face: detection, quarterTurns: turns,
-                        margin: HeadExtent.videoMotionMargin)
-                        ?? FaceGeometry.coverBox(
-                            x: detection.x, y: detection.y,
-                            width: detection.width, height: detection.height)
-                    head.x = sized.x
-                    head.y = sized.y
-                    head.width = sized.width
-                    head.height = sized.height
-                    return head
-                }
-            }
-            var all = TrackMath.associate(samples)
-            if wantIdentity {
-                let before = all.count
-                all = all.filter {
-                    FaceMatching.shouldCover($0.embedding,
-                                             except: selection.except, only: selection.only)
-                }
-                analysisDetail = "\(before) face tracks, \(before - all.count) left uncovered by reference match"
-            }
-            tracks = all.map {
-                Track(id: $0.id,
-                      keyframes: TrackMath.extend(
-                        TrackMath.smooth($0.keyframes, alpha: options.smoothing),
-                        hold: options.hold),
-                      embedding: $0.embedding)
-            }
-
-        case .text, .matching:
-            let matcher = target.textMatcher!
-            let samples = try await sampleDetections(
-                asset: asset, track: videoTrack, stride: options.detectStride, context: context
-            ) { image in
-                try Detector.textBoxes(in: image, matcher: matcher, quarterTurns: turns)
-            }
-            // Text is held a stride BEFORE it was first read as well as
-            // after: OCR that misreads a line on one sample leaves the
-            // frames before the next sample uncovered, and a card number
-            // showed at 0.1 s of a clip it was covered in from 0.25 s on.
-            tracks = TrackMath.associate(samples).map {
-                Track(id: $0.id,
-                      keyframes: TrackMath.leadIn(TrackMath.extend($0.keyframes, hold: options.hold + options.detectStride),
-                                                  by: options.detectStride))
-            }
-
-        case .regions, .person:
-            break
-        }
-
-        let reviewGaps = TrackMath.gaps(in: tracks, duration: duration.seconds)
-        let gapsOrNil = reviewGaps.isEmpty ? nil : reviewGaps
+        let source = try await VideoAnalysis.Source.load(url)
+        let analysis = try await VideoAnalysis.run(source, target: target, options: options)
+        let (asset, videoTrack, transform, duration, extent, turns) = (
+            source.asset, source.track, source.transform, source.duration, source.extent, source.turns)
+        let tracks = analysis.tracks
+        let analysisDetail = analysis.detail
+        let gapsOrNil = analysis.gaps
 
         if dryRun {
             let covers: Int
@@ -155,12 +78,12 @@ public enum VideoCensor {
                 covers = regions.count
             case .person:
                 let seen = try await samplePersonPresence(
-                    asset: asset, track: videoTrack, duration: duration.seconds, context: context)
+                    asset: asset, track: videoTrack, duration: duration.seconds, context: CIContext())
                 covers = seen
                 detail = "people present in \(seen) of 5 sampled frames"
             }
             return FileOutcome(input: url.path, status: .wouldCover, covers: covers,
-                               detail: detail, gaps: gapsOrNil)
+                               detail: detail, gaps: gapsOrNil, people: analysis.people)
         }
 
         let isPerson: Bool
@@ -174,7 +97,7 @@ public enum VideoCensor {
         }
         if case .faces = target, tracks.isEmpty {
             return FileOutcome(input: url.path, status: .skipped, covers: 0,
-                               detail: analysisDetail ?? "no faces detected")
+                               detail: analysisDetail ?? "no faces detected", people: analysis.people)
         }
         if target.textMatcher != nil, tracks.isEmpty {
             return FileOutcome(input: url.path, status: .skipped, covers: 0,
@@ -252,7 +175,9 @@ public enum VideoCensor {
             let t = pts.seconds
             var image = CIImage(cvPixelBuffer: buffer)
 
-            let covers = try plan.covers(at: t, buffer: buffer)
+            let covers = try plan.covers(at: t) {
+                try Detector.personSegmentationMask(in: buffer, extent: plan.extent)
+            }
             if !covers.isEmpty {
                 image = CoverRenderer.apply(covers, to: image, style: plan.style,
                                             emojiImage: plan.emojiImage)
@@ -297,7 +222,7 @@ public enum VideoCensor {
             input: url.path, output: output.path, status: .covered,
             covers: max(coverCount, regionCount),
             detail: analysisDetail ?? "\(counters.covered) of \(counters.frames) frames covered",
-            gaps: gapsOrNil)
+            gaps: gapsOrNil, people: analysis.people)
     }
 
     private final class Counters: @unchecked Sendable {
@@ -306,7 +231,7 @@ public enum VideoCensor {
     }
 
     /// Everything the per-frame cover decision needs, queue-confined.
-    private final class FramePlan: @unchecked Sendable {
+    final class FramePlan: @unchecked Sendable {
         let target: CensorTargetSpec
         let tracks: [Track]
         let isPerson: Bool
@@ -325,10 +250,12 @@ public enum VideoCensor {
             self.emojiImage = emojiImage
         }
 
-        func covers(at t: TimeInterval, buffer: CVPixelBuffer) throws -> [CoverRenderer.Cover] {
+        /// The covers at `t`; `personMask` segments this frame, asked only
+        /// in person mode.
+        func covers(at t: TimeInterval,
+                    personMask: () throws -> CIImage?) throws -> [CoverRenderer.Cover] {
             if isPerson {
-                guard let mask = try Detector.personSegmentationMask(in: buffer, extent: extent)
-                else { return [] }
+                guard let mask = try personMask() else { return [] }
                 return [.init(shape: .mask(mask), rect: extent)]
             }
             switch target {
@@ -362,7 +289,7 @@ public enum VideoCensor {
 
     /// The pre-rotation that makes an emoji upright after the display
     /// transform is applied — the INVERSE of the display rotation.
-    private static func emojiOrientation(quarterTurns: Int) -> CGImagePropertyOrientation {
+    static func emojiOrientation(quarterTurns: Int) -> CGImagePropertyOrientation {
         switch quarterTurns {
         case 1: return .left
         case 2: return .down
@@ -396,9 +323,9 @@ public enum VideoCensor {
 
     /// Decodes once, running `detect` on frames sampled every `stride`
     /// seconds; each detection is stamped with its sample time.
-    private static func sampleDetections(
+    static func sampleDetections(
         asset: AVURLAsset, track: AVAssetTrack, stride: TimeInterval, context: CIContext,
-        detect: (CGImage) throws -> [TrackMath.Detection]
+        detect: (CGImage, TimeInterval) async throws -> [TrackMath.Detection]
     ) async throws -> [[TrackMath.Detection]] {
         let reader = try AVAssetReader(asset: asset)
         let output = AVAssetReaderTrackOutput(
@@ -419,7 +346,7 @@ public enum VideoCensor {
             nextSample = t + stride
             let image = CIImage(cvPixelBuffer: buffer)
             guard let cgImage = context.createCGImage(image, from: image.extent) else { continue }
-            let stamped = try detect(cgImage).map { detection in
+            let stamped = try await detect(cgImage, t).map { detection in
                 var d = detection
                 d.time = t
                 return d
@@ -437,7 +364,7 @@ public enum VideoCensor {
         let stride = max(duration / 5, 0.1)
         let samples = try await sampleDetections(
             asset: asset, track: track, stride: stride, context: context
-        ) { image in
+        ) { image, _ in
             let request = try Detector.personMask(in: image, only: nil)
             return request == nil ? [] : [TrackMath.Detection(time: 0, x: 0, y: 0, width: 1, height: 1)]
         }

@@ -192,7 +192,7 @@ final class CensorKitTests: XCTestCase {
         return (data[0], data[1], data[2])
     }
 
-    func testStillRegionCoverChangesInsideLeavesOutside() throws {
+    func testStillRegionCoverChangesInsideLeavesOutside() async throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("censor-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -202,7 +202,7 @@ final class CensorKitTests: XCTestCase {
         let output = dir.appendingPathComponent("board-censored.png")
 
         let region = Region(x: 0.3, y: 0.3, width: 0.4, height: 0.4)
-        let outcome = try ImageCensor.censor(
+        let outcome = try await ImageCensor.censor(
             imageAt: input, target: .regions([region]),
             style: CoverStyle(mode: .blur, intensity: 1, padding: 1),
             to: output, dryRun: false)
@@ -244,7 +244,7 @@ final class CensorKitTests: XCTestCase {
         try FileManager.default.removeItem(at: png)
     }
 
-    func testACoveredPhotoKeepsNoLocationCameraOrAuthor() throws {
+    func testACoveredPhotoKeepsNoLocationCameraOrAuthor() async throws {
         // Found 2026-10-10: CIImage(contentsOf:) carries the source's
         // properties through every filter and writeJPEGRepresentation wrote
         // them back — GPS, make, model and serial number all survived a
@@ -259,7 +259,7 @@ final class CensorKitTests: XCTestCase {
 
         for ext in ["jpg", "heic", "png"] {
             let output = dir.appendingPathComponent("photo-censored.\(ext)")
-            _ = try ImageCensor.censor(imageAt: input, target: .regions([Region(x: 0.3, y: 0.3, width: 0.4, height: 0.4)]),
+            _ = try await ImageCensor.censor(imageAt: input, target: .regions([Region(x: 0.3, y: 0.3, width: 0.4, height: 0.4)]),
                                        style: CoverStyle(mode: .blur, intensity: 1, padding: 1),
                                        to: output, dryRun: false)
             XCTAssertEqual(MetadataCheck.leaks(in: output), [], "\(ext) kept metadata")
@@ -277,7 +277,7 @@ final class CensorKitTests: XCTestCase {
         XCTAssertTrue(found.isSuperset(of: ["GPS", "camera", "serial number", "author", "IPTC"]), "\(found)")
     }
 
-    func testDryRunRendersNothing() throws {
+    func testDryRunRendersNothing() async throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("censor-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -286,7 +286,7 @@ final class CensorKitTests: XCTestCase {
         try makeQuadrantImage(at: input)
         let output = dir.appendingPathComponent("board-censored.png")
 
-        let outcome = try ImageCensor.censor(
+        let outcome = try await ImageCensor.censor(
             imageAt: input, target: .regions([Region(x: 0.25, y: 0.25, width: 0.5, height: 0.5)]),
             style: CoverStyle(), to: output, dryRun: true)
         XCTAssertEqual(outcome.status, .wouldCover)
@@ -968,7 +968,7 @@ final class CensorKitTests: XCTestCase {
         XCTAssertEqual(gaps[1].end, duration, accuracy: 1e-9, "never re-acquired: review to the end")
     }
 
-    func testTiledPassFindsAFaceTheFullFrameMayMiss() throws {
+    func testTiledPassFindsAFaceTheFullFrameMayMiss() async throws {
         guard let fixtures else { throw XCTSkip("no face fixtures on this machine") }
         let url = fixtures.appendingPathComponent("businesswoman-isolated.jpg")
         guard FileManager.default.fileExists(atPath: url.path) else {
@@ -989,9 +989,9 @@ final class CensorKitTests: XCTestCase {
                                           width: Double(portrait.width) * scale, height: sprite))
         let canvas = context.makeImage()!
 
-        let thorough = try Detector.facesThorough(in: canvas, withEmbeddings: false)
+        let thorough = try await Detector.facesThorough(in: canvas, withEmbeddings: false)
         XCTAssertGreaterThanOrEqual(thorough.count, 1, "the tiled pass finds the small face")
-        let plain = try Detector.faces(in: canvas, withEmbeddings: false)
+        let plain = try await Detector.faces(in: canvas, withEmbeddings: false)
         XCTAssertGreaterThanOrEqual(thorough.count, plain.count,
                                     "tiling never loses what the full frame saw")
     }
@@ -1007,7 +1007,7 @@ final class CensorKitTests: XCTestCase {
         return URL(fileURLWithPath: path)
     }
 
-    func testDetectsARealFace() throws {
+    func testDetectsARealFace() async throws {
         guard let fixtures else { throw XCTSkip("no face fixtures on this machine") }
         let url = fixtures.appendingPathComponent("businesswoman-isolated.jpg")
         guard FileManager.default.fileExists(atPath: url.path) else {
@@ -1015,14 +1015,14 @@ final class CensorKitTests: XCTestCase {
         }
         let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
         let image = CGImageSourceCreateImageAtIndex(source, 0, nil)!
-        let faces = try Detector.faces(in: image, withEmbeddings: true)
+        let faces = try await Detector.faces(in: image, withEmbeddings: true)
         let face = try XCTUnwrap(faces.first, "the stock photo holds one detectable face")
         XCTAssertTrue(face.x >= 0 && face.x + face.width <= 1)
         XCTAssertTrue(face.y >= 0 && face.y + face.height <= 1)
         XCTAssertFalse(face.embedding.isEmpty, "identity mode carries a crop embedding")
     }
 
-    func testExceptLeavesTheReferencedPersonAlone() throws {
+    func testExceptLeavesTheReferencedPersonAlone() async throws {
         guard let fixtures else { throw XCTSkip("no face fixtures on this machine") }
         // Left: a different person (illustration). Right: the stock model.
         // Reference: the SAME model from a DIFFERENT shoot — the hardest
@@ -1065,9 +1065,9 @@ final class CensorKitTests: XCTestCase {
             format: .RGBA8, colorSpace: space)
 
         // Reference is the SAME person as the right half, from a different file.
-        let embedding = try References.embedding(fromImageAt: reference)
+        let embedding = try await References.embedding(fromImageAt: reference)
         let output = dir.appendingPathComponent("pair-censored.png")
-        let outcome = try ImageCensor.censor(
+        let outcome = try await ImageCensor.censor(
             imageAt: canvasURL, target: .faces(FaceSelection(except: [embedding])),
             style: CoverStyle(mode: .pixelate, intensity: 1, padding: 1.1),
             to: output, dryRun: false)

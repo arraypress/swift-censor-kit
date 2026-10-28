@@ -25,36 +25,53 @@ enum Detector {
     /// phone clip stores them sideways), and the boxes are carried back
     /// to storage space, where covers are drawn. Crops are uprighted
     /// before feature-printing so they match upright reference photos.
+    ///
+    /// Two detectors, merged: Vision's revision 3 and, on macOS 27, its
+    /// revision 4. MEASURED on 734 frames of a feature film: revision 4
+    /// found faces in 27 frames revision 3 missed (small, dark, half
+    /// behind a rifle scope; about 3 were not faces), and missed faces in
+    /// 4 frames revision 3 found (profiles). A missed face is the failure
+    /// that matters here, so both run; together they cost 40 ms a 1080p
+    /// frame against 13 ms for revision 3 alone.
     static func faces(in image: CGImage, withEmbeddings: Bool,
-                      quarterTurns: Int = 0) throws -> [TrackMath.Detection] {
-        let request = VNDetectFaceRectanglesRequest()
+                      quarterTurns: Int = 0) async throws -> [TrackMath.Detection] {
         let orientation = OrientationMap.visionOrientation(quarterTurns: quarterTurns)
+        // Both at once: they share nothing, and the newer one alone costs
+        // twice the older.
+        async let newer = newerFaceBoxes(in: image, orientation: orientation)
+        let request = VNDetectFaceRectanglesRequest()
         try VNImageRequestHandler(cgImage: image, orientation: orientation, options: [:])
             .perform([request])
-        var out: [TrackMath.Detection] = []
-        for observation in request.results ?? [] {
-            let box = observation.boundingBox
-            // Vision's origin is bottom-left in the ORIENTED image; flip
-            // to top-left there, then carry to storage space.
+        // Vision's origin is bottom-left in the ORIENTED image.
+        let boxes = (request.results ?? []).map(\.boundingBox) + (try await newer)
+        var found: [TrackMath.Detection] = []
+        for box in boxes {
+            // Flip to top-left in the oriented image, then carry to storage space.
             let storage = OrientationMap.toStorage(
                 x: box.origin.x, y: 1 - box.origin.y - box.height,
                 width: box.width, height: box.height, quarterTurns: quarterTurns)
-            var embedding: [Float] = []
-            if withEmbeddings {
-                let visionBox = CGRect(x: storage.x, y: 1 - storage.y - storage.height,
-                                       width: storage.width, height: storage.height)
-                if let crop = faceCrop(from: image, boundingBox: visionBox) {
-                    let uprighted = upright(crop, quarterTurns: quarterTurns)
-                    embedding = (try? featurePrint(of: uprighted)) ?? []
-                }
-            }
-            out.append(TrackMath.Detection(
-                time: 0,
-                x: storage.x, y: storage.y,
-                width: storage.width, height: storage.height,
-                embedding: embedding))
+            found.append(TrackMath.Detection(time: 0, x: storage.x, y: storage.y,
+                                             width: storage.width, height: storage.height))
         }
-        return out
+        found = Tiling.merge(found)
+        guard withEmbeddings else { return found }
+        return found.map { detection in
+            var detection = detection
+            let visionBox = CGRect(x: detection.x, y: 1 - detection.y - detection.height,
+                                   width: detection.width, height: detection.height)
+            if let crop = faceCrop(from: image, boundingBox: visionBox) {
+                detection.embedding = (try? featurePrint(of: upright(crop, quarterTurns: quarterTurns))) ?? []
+            }
+            return detection
+        }
+    }
+
+    /// Revision 4's boxes, bottom-left origin; none before macOS 27.
+    private static func newerFaceBoxes(in image: CGImage,
+                                       orientation: CGImagePropertyOrientation) async throws -> [CGRect] {
+        guard #available(macOS 27.0, *) else { return [] }
+        return try await DetectFaceRectanglesRequest(.revision4)
+            .perform(on: image, orientation: orientation).map(\.boundingBox.cgRect)
     }
 
     /// A storage-space crop rotated upright, for feature prints that can
@@ -112,8 +129,8 @@ enum Detector {
     }
 
     /// The largest face's embedding in a reference photo.
-    static func referenceEmbedding(in image: CGImage) throws -> [Float] {
-        let detections = try faces(in: image, withEmbeddings: true)
+    static func referenceEmbedding(in image: CGImage) async throws -> [Float] {
+        let detections = try await faces(in: image, withEmbeddings: true)
         guard let best = detections.max(by: { $0.width * $0.height < $1.width * $1.height }),
               !best.embedding.isEmpty else {
             throw CensorError.usage("no face found in the reference photo")
@@ -154,10 +171,20 @@ enum Detector {
 
     /// A fast all-person mask for a video frame, scaled to `extent`.
     static func personSegmentationMask(in buffer: CVPixelBuffer, extent: CGRect) throws -> CIImage? {
+        try personSegmentationMask(VNImageRequestHandler(cvPixelBuffer: buffer), extent: extent)
+    }
+
+    /// The same mask for a still taken from a video — a preview frame.
+    static func personSegmentationMask(in image: CGImage, extent: CGRect) throws -> CIImage? {
+        try personSegmentationMask(VNImageRequestHandler(cgImage: image), extent: extent)
+    }
+
+    private static func personSegmentationMask(_ handler: VNImageRequestHandler,
+                                               extent: CGRect) throws -> CIImage? {
         let request = VNGeneratePersonSegmentationRequest()
         request.qualityLevel = .balanced
         request.outputPixelFormat = kCVPixelFormatType_OneComponent8
-        try VNImageRequestHandler(cvPixelBuffer: buffer).perform([request])
+        try handler.perform([request])
         guard let observation = request.results?.first else { return nil }
         let mask = CIImage(cvPixelBuffer: observation.pixelBuffer)
         let sx = extent.width / mask.extent.width
@@ -220,8 +247,8 @@ extension Detector {
     static func facesThorough(
         in image: CGImage, withEmbeddings: Bool, quarterTurns: Int = 0,
         force: Bool = false
-    ) throws -> [TrackMath.Detection] {
-        var all = try faces(in: image, withEmbeddings: withEmbeddings,
+    ) async throws -> [TrackMath.Detection] {
+        var all = try await faces(in: image, withEmbeddings: withEmbeddings,
                             quarterTurns: quarterTurns)
         let longSide = max(image.width, image.height)
         guard force || longSide >= tilingMinimumDimension else { return all }
@@ -235,7 +262,7 @@ extension Detector {
             let rect = CGRect(x: tile.x * width, y: tile.y * height,
                               width: tile.width * width, height: tile.height * height)
             guard let crop = image.cropping(to: rect.integral) else { continue }
-            let found = try faces(in: crop, withEmbeddings: withEmbeddings,
+            let found = try await faces(in: crop, withEmbeddings: withEmbeddings,
                                   quarterTurns: quarterTurns)
             for detection in found {
                 let framed = Tiling.toFrame(

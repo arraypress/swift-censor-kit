@@ -20,7 +20,7 @@ public enum ImageCensor {
     public static func censor(
         imageAt url: URL, target: CensorTargetSpec, style: CoverStyle,
         to output: URL, dryRun: Bool
-    ) throws -> FileOutcome {
+    ) async throws -> FileOutcome {
         guard let image = CIImage(contentsOf: url, options: [.applyOrientationProperty: true]) else {
             throw CensorError.io("could not read \(url.lastPathComponent) as an image")
         }
@@ -37,7 +37,7 @@ public enum ImageCensor {
             // Full-frame plus tiles (big stills), in reading order so the
             // numbers --outline draws are the numbers --only takes.
             let detections = FaceOrdering.ordered(
-                try Detector.facesThorough(in: cgImage, withEmbeddings: selection.wantsIdentity))
+                try await Detector.facesThorough(in: cgImage, withEmbeddings: selection.wantsIdentity))
             var kept = 0
             for (index, detection) in detections.enumerated() {
                 let number = index + 1

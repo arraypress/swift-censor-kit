@@ -18,7 +18,7 @@ public enum References {
     /// - Throws: ``CensorError/usage(_:)`` when the file holds no
     ///   detectable face — a silent empty reference would quietly cover
     ///   the person it was meant to protect.
-    public static func embedding(fromImageAt url: URL) throws -> [Float] {
+    public static func embedding(fromImageAt url: URL) async throws -> [Float] {
         guard let image = CIImage(contentsOf: url, options: [.applyOrientationProperty: true]) else {
             throw CensorError.io("could not read reference \(url.lastPathComponent) as an image")
         }
@@ -27,7 +27,7 @@ public enum References {
             throw CensorError.processing("could not rasterize reference \(url.lastPathComponent)")
         }
         do {
-            return try Detector.referenceEmbedding(in: cgImage)
+            return try await Detector.referenceEmbedding(in: cgImage)
         } catch let error as CensorError {
             if case .usage = error {
                 throw CensorError.usage("no face found in reference \(url.lastPathComponent)")

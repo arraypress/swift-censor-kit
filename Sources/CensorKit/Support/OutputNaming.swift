@@ -37,6 +37,16 @@ public enum OutputNaming {
             .appendingPathComponent(name).appendingPathExtension(ext)
     }
 
+    /// A sheet's URL: `name-<kind>.jpg` where the copy would go — the
+    /// people a video holds (`people`), or covered stills (`preview`).
+    public static func sheet(
+        _ kind: String, for input: URL, outDir: URL?, root: URL?
+    ) -> URL {
+        let copy = output(for: input, outDir: outDir, root: root, isVideo: false)
+        let name = input.deletingPathExtension().lastPathComponent + "-" + kind
+        return copy.deletingLastPathComponent().appendingPathComponent(name).appendingPathExtension("jpg")
+    }
+
     /// Whether to skip: the output exists and is newer than the input, and
     /// nobody said `--force`. Also refuses the degenerate case where input
     /// and output collide.
